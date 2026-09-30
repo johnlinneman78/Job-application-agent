@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from 'react-router-dom'
 import './App.css'
 import LiveFeed from './components/LiveFeed'
 
@@ -139,10 +139,11 @@ function AuthProvider({ children }) {
   )
 }
 
-// Navigation Bar
+// Navigation Bar using React Router Link for smooth client-side routing
 function Navbar() {
   const { user, logout } = React.useContext(AuthContext)
-  const path = window.location.pathname
+  const location = useLocation()
+  const path = location.pathname
 
   return (
     <nav className="navbar">
@@ -153,10 +154,10 @@ function Navbar() {
         <span>JobAgent.ai</span>
       </div>
       <div className="nav-links">
-        <a href="/" className={path === '/' ? 'active' : ''}>Dashboard</a>
-        <a href="/queue" className={path === '/queue' ? 'active' : ''}>Queue</a>
-        <a href="/applications" className={path === '/applications' ? 'active' : ''}>History</a>
-        <a href="/config" className={path === '/config' ? 'active' : ''}>Settings</a>
+        <Link to="/" className={path === '/' ? 'active' : ''}>Dashboard</Link>
+        <Link to="/queue" className={path === '/queue' ? 'active' : ''}>Queue</Link>
+        <Link to="/applications" className={path === '/applications' ? 'active' : ''}>History</Link>
+        <Link to="/config" className={path === '/config' ? 'active' : ''}>Settings</Link>
       </div>
       <div className="nav-user">
         <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>{user?.full_name || user?.email}</span>
@@ -221,6 +222,7 @@ function LoginPage() {
 function Dashboard() {
   const [stats, setStats] = useState(null)
   const [summary, setSummary] = useState(null)
+  const [userConfig, setUserConfig] = useState(null)
   const [loading, setLoading] = useState(true)
   const [actionStatus, setActionStatus] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
@@ -229,15 +231,17 @@ function Dashboard() {
 
   const refreshData = async () => {
     try {
-      const [statsData, summaryData, statusData] = await Promise.all([
+      const [statsData, summaryData, statusData, configData] = await Promise.all([
         API.request('/api/applications/stats'),
         API.request('/api/reports/summary'),
-        API.getAgentStatus()
+        API.getAgentStatus(),
+        API.getConfig()
       ])
       setStats(statsData)
       setSummary(summaryData)
       setAgentRunning(statusData?.is_running || false)
       setTaskType(statusData?.task_type || null)
+      setUserConfig(configData)
     } catch (err) {
       console.error('Dashboard refresh failed:', err)
     }
@@ -250,7 +254,6 @@ function Dashboard() {
     }
     init()
 
-    // Poll status periodically
     const interval = setInterval(refreshData, 3000)
     return () => clearInterval(interval)
   }, [])
@@ -304,6 +307,7 @@ function Dashboard() {
   if (loading) return <div className="loading shimmer" style={{ padding: '4rem' }}>Synchronizing...</div>
 
   const queueCount = summary?.jobs_in_queue || 0
+  const resumeAttached = Boolean(userConfig?.personal_info?.resume_path)
 
   return (
     <div className="dashboard">
@@ -347,26 +351,41 @@ function Dashboard() {
         <div className="dashboard-left" style={{ display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
           <LiveFeed API={API} />
 
+          {/* ACTIVE PROFILE & RESUME CARD */}
           <div className="glass" style={{ padding: '1.5rem' }}>
-            <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', gap: '0.75rem', fontSize: '1rem' }}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
-              </svg>
-              System Parameters
+            <h3 style={{ marginBottom: '1.25rem', display: 'flex', alignItems: 'center', justifyContent: 'space-between', fontSize: '1rem' }}>
+              <span style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--primary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                </svg>
+                Active Candidate Profile
+              </span>
+              <Link to="/config" style={{ fontSize: '0.8rem', color: 'var(--primary)', textDecoration: 'none' }}>Edit Profile →</Link>
             </h3>
-            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '1rem' }}>
-              <div className="param-item">
-                <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem', textTransform: 'uppercase' }}>Mode</div>
-                <div style={{ color: 'var(--primary)', fontWeight: '600' }}>Safe Easy-Apply</div>
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1rem' }}>
+              <div>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', textTransform: 'uppercase' }}>Candidate</div>
+                <div style={{ fontWeight: '600', color: 'var(--text-main)' }}>{userConfig?.personal_info?.name || 'John Linneman'}</div>
               </div>
-              <div className="param-item">
-                <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem', textTransform: 'uppercase' }}>Engine</div>
-                <div style={{ color: 'var(--primary)', fontWeight: '600' }}>Playwright Auth</div>
+              <div>
+                <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', textTransform: 'uppercase' }}>Resume Status</div>
+                <div style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.4rem',
+                  fontWeight: '600',
+                  color: resumeAttached ? 'var(--success)' : 'var(--danger)',
+                  fontSize: '0.85rem'
+                }}>
+                  <span>{resumeAttached ? '✓ resume.pdf (Saved & Active)' : '⚠️ No Resume Attached'}</span>
+                </div>
               </div>
-              <div className="param-item">
-                <div style={{ color: 'var(--text-muted)', fontSize: '0.7rem', textTransform: 'uppercase' }}>Session</div>
-                <div style={{ color: 'var(--success)', fontWeight: '600' }}>LinkedIn Active</div>
-              </div>
+            </div>
+
+            <div style={{ borderTop: '1px solid var(--card-border)', paddingTop: '0.75rem', fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+              <strong>Target Keywords:</strong> {(userConfig?.search?.keywords || []).slice(0, 5).join(', ')}
             </div>
           </div>
         </div>
@@ -568,6 +587,9 @@ function ConfigurationPage() {
   const [nameStr, setNameStr] = useState('')
   const [emailStr, setEmailStr] = useState('')
   const [phoneStr, setPhoneStr] = useState('')
+  const [resumePath, setResumePath] = useState('')
+  const [resumeFileName, setResumeFileName] = useState('')
+  const [uploadingResume, setUploadingResume] = useState(false)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
 
@@ -579,8 +601,32 @@ function ConfigurationPage() {
       setNameStr(cfg.personal_info?.name || '')
       setEmailStr(cfg.personal_info?.email || '')
       setPhoneStr(cfg.personal_info?.phone || '')
+      const rPath = cfg.personal_info?.resume_path || ''
+      setResumePath(rPath)
+      if (rPath) setResumeFileName('resume.pdf')
     }).catch(console.error)
   }, [])
+
+  const handleResumeUpload = async (e) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    setUploadingResume(true)
+    setMessage('')
+    try {
+      const data = await API.uploadResume(file)
+      setResumePath(data.path)
+      setResumeFileName(file.name)
+      setMessage(`✓ Resume "${file.name}" uploaded & saved!`)
+      // Refresh config from server
+      const updated = await API.getConfig()
+      setConfig(updated)
+      setTimeout(() => setMessage(''), 4000)
+    } catch (err) {
+      setMessage(`✗ Upload failed: ${err.message}`)
+    } finally {
+      setUploadingResume(false)
+    }
+  }
 
   const handleSave = async () => {
     setSaving(true)
@@ -591,13 +637,14 @@ function ConfigurationPage() {
       const updatedConfig = {
         ...config,
         personal_info: {
-          ...config.personal_info,
+          ...config?.personal_info,
           name: nameStr,
           email: emailStr,
-          phone: phoneStr
+          phone: phoneStr,
+          resume_path: resumePath || config?.personal_info?.resume_path || ''
         },
         search: {
-          ...config.search,
+          ...config?.search,
           keywords: parsedKeywords,
           locations: parsedLocations
         }
@@ -605,7 +652,7 @@ function ConfigurationPage() {
 
       await API.updateConfig(updatedConfig)
       setConfig(updatedConfig)
-      setMessage('✓ Saved successfully')
+      setMessage('✓ All settings & resume saved successfully!')
       setTimeout(() => setMessage(''), 3000)
     } catch (err) {
       setMessage(`✗ Error: ${err.message}`)
@@ -622,7 +669,7 @@ function ConfigurationPage() {
         <div>
           <h1>Settings</h1>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '0.25rem' }}>
-            Configure your target roles, locations, and personal information
+            Configure your target roles, locations, and personal profile
           </p>
         </div>
         <button onClick={handleSave} disabled={saving} className="btn btn-primary">{saving ? 'Saving...' : 'Save Changes'}</button>
@@ -644,16 +691,57 @@ function ConfigurationPage() {
             <label>Phone</label>
             <input type="text" value={phoneStr} onChange={(e) => setPhoneStr(e.target.value)} />
           </div>
-          <div className="form-group">
-            <label>Resume (PDF)</label>
-            <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
-              <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>{config.personal_info?.resume_path ? '📄 Attached' : 'No file'}</span>
-              <input type="file" accept=".pdf" onChange={async (e) => {
-                if (e.target.files[0]) {
-                  const data = await API.uploadResume(e.target.files[0])
-                  setConfig({ ...config, personal_info: { ...config.personal_info, resume_path: data.path } })
-                }
-              }} />
+
+          {/* DEDICATED RESUME ATTACHMENT CARD */}
+          <div className="form-group" style={{ marginTop: '1.5rem' }}>
+            <label style={{ display: 'block', marginBottom: '0.5rem' }}>Resume Document</label>
+            <div style={{
+              padding: '1rem',
+              borderRadius: '12px',
+              background: resumePath ? 'rgba(16, 185, 129, 0.08)' : 'rgba(239, 68, 68, 0.08)',
+              border: `1px solid ${resumePath ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '0.75rem'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke={resumePath ? 'var(--success)' : 'var(--danger)'} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                  </svg>
+                  <div>
+                    <div style={{ fontWeight: '600', fontSize: '0.9rem', color: resumePath ? 'var(--success)' : 'var(--danger)' }}>
+                      {resumePath ? `✓ Active Resume: ${resumeFileName || 'resume.pdf'}` : '⚠️ No Resume Attached'}
+                    </div>
+                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                      {resumePath ? 'Configured and ready for automated applications' : 'Upload your PDF resume to enable auto-applying'}
+                    </div>
+                  </div>
+                </div>
+
+                <label style={{
+                  background: 'var(--primary)',
+                  color: '#000',
+                  padding: '0.45rem 0.9rem',
+                  borderRadius: '6px',
+                  fontWeight: '600',
+                  fontSize: '0.8rem',
+                  cursor: 'pointer',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '0.4rem'
+                }}>
+                  <span>{uploadingResume ? 'Uploading...' : (resumePath ? 'Upload New PDF' : 'Choose PDF')}</span>
+                  <input
+                    type="file"
+                    accept=".pdf"
+                    style={{ display: 'none' }}
+                    onChange={handleResumeUpload}
+                    disabled={uploadingResume}
+                  />
+                </label>
+              </div>
             </div>
           </div>
         </div>
