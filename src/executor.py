@@ -1,440 +1,587 @@
-"""
-Application Executor - Submit applications to jobs with strict FSM logic.
-
-Phase 7: Guarded Execution - STRICT FSM VERSION
-"""
-import asyncio
-import logging
-import time
-from datetime import datetime
-from enum import Enum, auto
-from pathlib import Path
-from typing import List, Optional, Tuple
-
-from playwright.async_api import Page, BrowserContext, Locator
-from src.models import Job, Application, ApplicationStatus, Platform
-from src.application_guard import ApplicationGuard
-
-logger = logging.getLogger(__name__)
-
-class FSMState(Enum):
-    JOB_PAGE = auto()
-    EASY_APPLY_MODAL_OPEN = auto()
-    STEP_IN_PROGRESS = auto()
-    REVIEW = auto()
-    SUBMIT_READY = auto()
-    SUBMITTED = auto()
-    SKIPPED = auto()
-
-class TerminalReason(Enum):
-    SUBMITTED = "SUBMITTED"
-    COVER_LETTER_REQUIRED = "Cover letter required"
-    SCREENING_QUESTIONS = "Screening questions present"
-    EXTERNAL_REDIRECT = "External redirect"
-    SECURITY_CHECKPOINT = "CAPTCHA / security checkpoint"
-    UPLOAD_FAILED = "Upload failed / file picker blocked"
-    NEXT_DISABLED = "Next button disabled"
-    STUCK = "Unknown UI state after 3 recovery attempts"
-    NO_EASY_APPLY = "No Easy Apply button found"
-
-class ApplicationExecutor:
-    """
-    Execute job applications with strict FSM logic and resume-only policy.
-    """
-    
-    def __init__(self, config: dict, guard: ApplicationGuard):
-        self.config = config
-        self.guard = guard
-        self.context: Optional[BrowserContext] = None
-        self.page: Optional[Page] = None
-        self.applications: List[Application] = []
-        self._recovery_attempts = 0
-        self._last_fingerprint = ""
-
-    async def login_to_linkedin(self, page: Page) -> bool:
-        """Perform manual login to LinkedIn."""
-        logger.info("Opening LinkedIn login page...")
-        await page.goto("https://www.linkedin.com/login", timeout=60000)
-        logger.info("[PAUSE] Please log in to LinkedIn manually...")
-        try:
-            await page.wait_for_url("**/feed/**", timeout=300000)
-            logger.info("LinkedIn login successful!")
-            return True
-        except Exception as e:
-            logger.error(f"LinkedIn login failed: {e}")
-            return False
-
-    async def apply_to_linkedin_job(self, job: Job, resume_path: str) -> Application:
-        """Apply to a single LinkedIn job using the Strict FSM approach."""
-        app = Application(job=job, resume_path=resume_path, status=ApplicationStatus.PREPARED)
-        state = FSMState.JOB_PAGE
-        terminal_reason = None
-        transitions = []
-        buttons_clicked = []
-        
-        logger.info(f"--- Starting Application: {job.company} - {job.title} ---")
-        
-        try:
-            await self.page.goto(job.url, timeout=30000)
-            await self.page.wait_for_timeout(2000)
-            
-            self._recovery_attempts = 0
-            self._last_fingerprint = ""
-            
-            for _ in range(20): # Safety limit for button advances
-                transitions.append(state.name)
-                
-                if state == FSMState.JOB_PAGE:
-                    ea_btn = await self._find_ea_button_robust()
-                    if not ea_btn:
-                        state = FSMState.SKIPPED
-                        terminal_reason = TerminalReason.NO_EASY_APPLY
-                        continue
-                    
-                    await ea_btn.click(force=True)
-                    buttons_clicked.append("Easy Apply")
-                    await self.page.wait_for_timeout(2000)
-                    state = FSMState.EASY_APPLY_MODAL_OPEN
-
-                elif state in [FSMState.EASY_APPLY_MODAL_OPEN, FSMState.STEP_IN_PROGRESS, FSMState.REVIEW]:
-                    # 1. Check for success first
-                    if await self._detect_success_proof():
-                        state = FSMState.SUBMITTED
-                        terminal_reason = TerminalReason.SUBMITTED
-                        continue
-
-                    # 2. Get Modal
-                    modal = self.page.locator('[role="dialog"], .artdeco-modal, .jobs-easy-apply-modal').first
-                    if not await modal.count():
-                        # Maybe it closed on success?
-                        if await self._detect_success_proof():
-                            state = FSMState.SUBMITTED
-                            terminal_reason = TerminalReason.SUBMITTED
-                        else:
-                            state = FSMState.SKIPPED
-                            terminal_reason = TerminalReason.STUCK
-                        continue
-
-                    # 3. Detect Screening Questions (Immediate Skip)
-                    if await self._is_screening_required(modal):
-                        state = FSMState.SKIPPED
-                        terminal_reason = TerminalReason.SCREENING_QUESTIONS
-                        continue
-
-                    # 4. Handle Resume (if visible)
-                    await self._ensure_resume_selected(modal)
-
-                    # 5. Identify and Click Best Button
-                    btn, btn_type = await self._find_priority_button(modal)
-                    if not btn:
-                        # Attempt recovery if possible
-                        if await self._attempt_recovery(modal, job):
-                            continue
-                        state = FSMState.SKIPPED
-                        terminal_reason = TerminalReason.STUCK
-                        continue
-
-                    # 6. Click and Detect Progress
-                    old_fingerprint = await self._get_modal_fingerprint(modal)
-                    await self._click_robustly(btn)
-                    buttons_clicked.append(btn_type)
-                    await self.page.wait_for_timeout(2000)
-                    
-                    new_fingerprint = await self._get_modal_fingerprint(modal)
-                    if new_fingerprint == old_fingerprint and not await self._detect_success_proof():
-                        logger.warning(f"  No progress detected after clicking {btn_type}")
-                        if await self._attempt_recovery(modal, job):
-                            continue
-                        state = FSMState.SKIPPED
-                        terminal_reason = TerminalReason.STUCK
-                        continue
-                    
-                    # Update State based on button clicked and result
-                    if btn_type == "SUBMIT":
-                        await self.page.wait_for_timeout(3000)
-                        if await self._detect_success_proof():
-                            state = FSMState.SUBMITTED
-                            terminal_reason = TerminalReason.SUBMITTED
-                        else:
-                            state = FSMState.STEP_IN_PROGRESS # Retry or check for errors
-                    elif btn_type == "REVIEW":
-                        state = FSMState.REVIEW
-                    else:
-                        state = FSMState.STEP_IN_PROGRESS
-
-                elif state == FSMState.SUBMITTED:
-                    app.status = ApplicationStatus.SUBMITTED
-                    app.submission_timestamp = datetime.now()
-                    await self._close_modal_if_open()
-                    break
-
-                elif state == FSMState.SKIPPED:
-                    app.status = ApplicationStatus.SKIPPED
-                    app.error_message = terminal_reason.value
-                    await self._close_modal_if_open()
-                    break
-
-            # Final Logging
-            self._log_terminal_state(job, transitions, terminal_reason, buttons_clicked)
-            return app
-
-        except Exception as e:
-            logger.error(f"✗ Unexpected Error: {e}")
-            app.status = ApplicationStatus.FAILED
-            return app
-
-    async def _find_ea_button_robust(self):
-        """
-        VERIFIED SELECTORS - Extracted from 21 actual successful applications.
-        Source: interaction_flow_1769567870414.json
-        """
-        logger.info("Starting Easy Apply detection (golden selectors)...")
-        
-        for attempt in range(2):
-            logger.debug(f"Detection attempt {attempt + 1}/2")
-            
-            # Wait for content to settle
-            await self._wait_for_content_settle()
-            
-            # Priority order based on ACTUAL recorded interactions
-            selectors = [
-                # 1. PRIMARY: Used in 100% of your successful applications
-                '#jobs-apply-button-id',
-                
-                # 2. FALLBACK: Button text span (if structure changes)
-                'button span.artdeco-button__text:has-text("Easy Apply")',
-                'button span.artdeco-button__text:has-text("Apply")',
-                
-                # 3. LAST RESORT: XPath from logs
-                'xpath=//*[@id="jobs-apply-button-id"]',
-            ]
-            
-            for selector in selectors:
-                try:
-                    btn = self.page.locator(selector).first
-                    
-                    # Check visibility with timeout
-                    if await btn.is_visible(timeout=2000):
-                        logger.info(f"Found Easy Apply button via: {selector}")
-                        
-                        # Verify it's not a denied button
-                        try:
-                            text = (await btn.inner_text() or "").lower()
-                            if any(denied in text for denied in ["save", "follow", "share"]):
-                                logger.debug(f"Rejected denied button: {text}")
-                                continue
-                        except:
-                            pass
-                        
-                        return btn
-                        
-                except Exception as e:
-                    logger.debug(f"Selector {selector} failed: {e}")
-                    continue
-            
-            # Retry logic
-            if attempt == 0:
-                logger.warning("First pass failed, waiting 1.2s before retry...")
-                await self.page.wait_for_timeout(1200)
-        
-        # Both passes failed
-        logger.error("✗ Easy Apply button NOT FOUND after 2 attempts")
-        await self._capture_failure_artifacts("no_easy_apply_button")
-        return None
-
-    async def _wait_for_content_settle(self):
-        """Wait for LinkedIn content to fully load."""
-        # Basic DOM ready
-        await self.page.wait_for_load_state("domcontentloaded")
-        await self.page.wait_for_timeout(500)
-        
-        # Network settle
-        try:
-            await self.page.wait_for_load_state("networkidle", timeout=5000)
-        except:
-            logger.debug("Network didn't settle in 5s, continuing anyway")
-        
-        # Wait for any button to exist
-        try:
-            await self.page.get_by_role("button").first.wait_for(
-                state="visible",
-                timeout=8000
-            )
-        except:
-            pass
-
-    async def _capture_failure_artifacts(self, reason: str):
-        """Capture screenshot and button inventory on failure."""
-        timestamp = int(time.time())
-        
-        # Ensure data dir exists
-        Path("data").mkdir(exist_ok=True)
-        
-        # Screenshot
-        screenshot_path = f"data/failure_{reason}_{timestamp}.png"
-        try:
-            await self.page.screenshot(path=screenshot_path)
-            logger.info(f"Screenshot saved: {screenshot_path}")
-        except Exception as e:
-            logger.error(f"Failed to capture screenshot: {e}")
-        
-        # Button inventory
-        try:
-            buttons = await self.page.get_by_role("button").all()
-            button_inventory = []
-            
-            for i, btn in enumerate(buttons[:20]):
-                try:
-                    if await btn.is_visible(timeout=500):
-                        text = (await btn.inner_text() or "").strip()
-                        aria = (await btn.get_attribute("aria-label") or "").strip()
-                        button_inventory.append(
-                            f"{i+1}. Text: '{text}' | ARIA: '{aria}'"
-                        )
-                except Exception:
-                    continue
-            
-            inventory_path = f"data/button_inventory_{timestamp}.txt"
-            with open(inventory_path, 'w', encoding='utf-8') as f:
-                f.write(f"Failure Reason: {reason}\n")
-                f.write(f"URL: {self.page.url}\n\n")
-                f.write("VISIBLE BUTTONS:\n")
-                if button_inventory:
-                    f.write("\n".join(button_inventory))
-                else:
-                    f.write("No visible buttons found\n")
-            
-            logger.info(f"Button inventory saved: {inventory_path}")
-        except Exception as e:
-            logger.warning(f"Failed to capture button inventory: {e}")
-
-    async def _find_priority_button(self, modal: Locator) -> Tuple[Optional[Locator], Optional[str]]:
-        """
-        STRICT Priority: Submit application > Next > Review > Continue
-        """
-        # 1. Submit application (Highest Priority)
-        for s in ['button:has-text("Submit application")', 'button:has-text("Submit")']:
-            loc = modal.locator(s).first
-            if await loc.count() and await loc.is_visible(): return loc, "SUBMIT"
-        
-        # 2. Next / Continue
-        for s in ['button:has-text("Next")', 'button:has-text("Continue")', 'button:has-text("next")']:
-            loc = modal.locator(s).first
-            if await loc.count() and await loc.is_visible(): return loc, "NEXT"
-
-        # 3. Review
-        loc = modal.locator('button:has-text("Review")').first
-        if await loc.count() and await loc.is_visible(): return loc, "REVIEW"
-            
-        # Primary footer fallback (Strict Order)
-        primary = modal.locator('.artdeco-modal__actionbar button.artdeco-button--primary').first
-        if await primary.count() and await primary.is_visible():
-            text = (await primary.inner_text()).lower()
-            if "submit" in text: return primary, "SUBMIT"
-            if "next" in text or "continue" in text: return primary, "NEXT"
-            if "review" in text: return primary, "REVIEW"
-            
-        return None, None
-
-    async def _is_screening_required(self, modal: Locator) -> bool:
-        """
-        STRICT Check: ANY specific question is a DISQUALIFIER.
-        Allowed:
-        - Contact Info confirmation
-        - Resume selection
-        - Terms/Privacy acknowledgements
-        """
-        # 1. Text/TextArea (Input fields)
-        # Allow only known contact fields (phone/email usually pre-filled)
-        if await modal.locator('textarea').count() > 0: return True
-        
-        inputs = await modal.locator('input[type="text"], input[type="email"], input[type="tel"]').all()
-        for i in inputs:
-            if await i.is_visible():
-                label = (await i.get_attribute("aria-label") or "").lower()
-                # If it's not a standard contact field we can't auto-fill, SKIP.
-                # Usually these are pre-filled, but if empty and required, it's a question.
-                # Strict Mode: Any visible text input that requires typing is risky.
-                # However, LinkedIn usually pre-fills. We check if it is "Question" related.
-                # Safest Strict Rule: If it looks like a custom question, Skip.
-                if any(x in label for x in ["how many", "years", "experience", "salary", "sponsorship"]):
-                    return True
-
-        # 2. Selects (Dropdowns) - ALWAYS SKIP
-        if await modal.locator('select').count() > 0: return True
-
-        # 3. Radios - ALWAYS SKIP (Authorization/Sponsorship/Demographics)
-        if await modal.locator('fieldset, [role="radiogroup"], input[type="radio"]').count() > 0:
-            return True
-
-        # 4. Checkboxes - Allow ONLY Terms/Privacy
-        checkboxes = await modal.locator('input[type="checkbox"]').all()
-        for c in checkboxes:
-            if await c.is_visible():
-                id_val = await c.get_attribute("id")
-                label = ""
-                if id_val:
-                     label_elem = self.page.locator(f'label[for="{id_val}"]').first
-                     if await label_elem.count():
-                         label = (await label_elem.inner_text()).lower()
-                
-                # If label doesn't contain "terms", "privacy", "acknowledge", "agree" -> SKIP
-                if not any(k in label for k in ["terms", "privacy", "policy", "acknowledge", "agree", "confirm"]):
-                    return True
-
-        return False
-
-    async def _attempt_recovery(self, modal: Locator, job: Job) -> bool:
-        self._recovery_attempts += 1
-        # MAX 2 Retries (User Rule: "Max 2 retries per state")
-        if self._recovery_attempts > 2: return False
-        
-        logger.warning(f"  Recovery Attempt {self._recovery_attempts} for {job.company}")
-        
-        if self._recovery_attempts == 1:
-            # Scroll to bottom
-            await modal.evaluate("el => el.scrollTop = el.scrollHeight")
-            await self.page.wait_for_timeout(1000)
-            return True
-        
-        if self._recovery_attempts == 2:
-            # Try global selector fallback (implicitly handled by next loop's find)
-            await self.page.wait_for_timeout(1000)
-            return True
-            
-        return False
-
-    async def _detect_success_proof(self) -> bool:
-        content = (await self.page.content()).lower()
-        # Confirmation screen text
-        if any(p in content for p in ["application submitted", "your application has been submitted", "submitted"]):
-            return True
-        # Check for Submitted badge on page
-        badge = self.page.locator('.artdeco-inline-feedback--success, :has-text("Applied")').first
-        if await badge.count() and await badge.is_visible():
-            return True
-        return False
-
-    async def _close_modal_if_open(self):
-        close = self.page.locator('button:has-text("Done"), [aria-label*="Dismiss"], .artdeco-modal__dismiss').first
-        if await close.count() and await close.is_visible():
-            await close.click(force=True)
-
-    def _log_terminal_state(self, job: Job, transitions: List[str], reason: Optional[TerminalReason], buttons: List[str]):
-        status = reason.value if reason else "UNKNOWN"
-        logger.info(f"Job: {job.title} + {job.company}")
-        logger.info(f"States traversed: {' -> '.join(transitions)}")
-        logger.info(f"Buttons clicked: {buttons}")
-        logger.info(f"Final outcome: {status}")
-
-    async def apply_to_jobs(self, jobs: List[Job], resume_path: str, context: BrowserContext) -> List[Application]:
-        logger.info(f"Starting execution for {len(jobs)} jobs...")
-        self.context = context
-        if not self.page: self.page = await self.context.new_page()
-        for job in jobs:
-            if job.platform == Platform.LINKEDIN:
-                app = await self.apply_to_linkedin_job(job, resume_path)
-                self.applications.append(app)
-            # Mandatory delay between applications
-            await asyncio.sleep(self.config.get("application", {}).get("min_delay", 30))
-        return self.applications
+"""
+Application Executor - Submit LinkedIn Easy Apply applications with a strict FSM.
+
+Rules this file enforces:
+- Only click Next / Review / Submit inside the Easy Apply dialog.
+- Skip the job the moment a real screening question appears.
+- A job counts as SUBMITTED only after we clicked Submit AND LinkedIn shows
+  a visible confirmation. Page source text is never used as proof.
+"""
+import asyncio
+import hashlib
+import logging
+import random
+import re
+import time
+from datetime import datetime
+from enum import Enum, auto
+from pathlib import Path
+from typing import List, Optional, Tuple
+
+from playwright.async_api import Page, BrowserContext, Locator
+from src.models import Job, Application, ApplicationStatus, Platform
+from src.application_guard import ApplicationGuard, EASY_APPLY_SELECTORS, DENIED_BUTTON_WORDS
+
+logger = logging.getLogger(__name__)
+
+MODAL_SELECTOR = 'dialog, [role="dialog"], .jobs-easy-apply-modal, .artdeco-modal'
+
+# Fields LinkedIn pre-fills from the profile on the "Contact info" step.
+# These are NOT screening questions.
+CONTACT_FIELD_WORDS = [
+    "email", "phone", "country code", "mobile", "first name", "last name",
+    "city", "location", "address", "zip", "postal",
+]
+
+# Checkbox labels that are safe to leave alone / accept.
+SAFE_CHECKBOX_WORDS = [
+    "terms", "privacy", "policy", "acknowledge", "agree", "confirm",
+    "follow", "top choice", "save this",
+]
+
+# Visible confirmation text LinkedIn shows after a successful submit.
+SUCCESS_PATTERNS = re.compile(
+    r"(application (was )?sent|your application was submitted|application submitted)",
+    re.IGNORECASE,
+)
+
+
+class FSMState(Enum):
+    JOB_PAGE = auto()
+    EASY_APPLY_MODAL_OPEN = auto()
+    STEP_IN_PROGRESS = auto()
+    REVIEW = auto()
+    SUBMIT_CLICKED = auto()
+    SUBMITTED = auto()
+    SKIPPED = auto()
+
+
+class TerminalReason(Enum):
+    SUBMITTED = "SUBMITTED"
+    COVER_LETTER_REQUIRED = "Cover letter required"
+    SCREENING_QUESTIONS = "Screening questions present"
+    EXTERNAL_REDIRECT = "External redirect"
+    SECURITY_CHECKPOINT = "CAPTCHA / security checkpoint"
+    UPLOAD_FAILED = "Upload failed / file picker blocked"
+    NEXT_DISABLED = "Next button disabled"
+    STUCK = "Unknown UI state after recovery attempts"
+    NO_EASY_APPLY = "No Easy Apply button found"
+    NO_CONFIRMATION = "Clicked Submit but no confirmation was shown"
+
+
+class ApplicationExecutor:
+    """Execute job applications with strict FSM logic and resume-only policy."""
+
+    def __init__(self, config: dict, guard: ApplicationGuard):
+        self.config = config
+        self.guard = guard
+        self.context: Optional[BrowserContext] = None
+        self.page: Optional[Page] = None
+        self.resume = None
+        self.resume_path: Optional[str] = None
+        self.applications: List[Application] = []
+        self._recovery_attempts = 0
+
+    # ------------------------------------------------------------------ login
+
+    async def is_logged_in(self, page: Page) -> bool:
+        """True if the LinkedIn global nav (only shown when signed in) is present."""
+        try:
+            if "login" in page.url or "checkpoint" in page.url or "authwall" in page.url:
+                return False
+            nav = page.locator("header nav, nav, #global-nav, .global-nav__me, .global-nav__me-photo, button[aria-label*='Me'], a[href*='/feed']").first
+            if await nav.count() > 0 and await nav.is_visible():
+                return True
+            return "feed" in page.url
+        except Exception:
+            return False
+
+    async def login_to_linkedin(self, page: Page, timeout_ms: int = 300000) -> bool:
+        """
+        Open LinkedIn. If already signed in (saved browser profile), return at once.
+        Otherwise wait up to `timeout_ms` for the user to sign in by hand.
+        """
+        logger.info("Checking LinkedIn login...")
+        await page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=60000)
+        await page.wait_for_timeout(3000)
+        if await self.is_logged_in(page):
+            logger.info("Already logged in to LinkedIn.")
+            return True
+
+        logger.info("[PAUSE] Please log in to LinkedIn in the browser window (5 minute limit)...")
+        deadline = time.time() + timeout_ms / 1000
+        while time.time() < deadline:
+            await page.wait_for_timeout(2000)
+            if await self.is_logged_in(page):
+                logger.info("LinkedIn login successful!")
+                return True
+        logger.error("LinkedIn login not detected within the time limit.")
+        return False
+
+    # ------------------------------------------------------------ main flow
+
+    async def apply_to_linkedin_job(self, job: Job, resume_path: str) -> Application:
+        """Apply to a single LinkedIn job using the strict FSM."""
+        self.resume_path = resume_path
+        app = Application(job=job, resume_path=resume_path, status=ApplicationStatus.PREPARED)
+        state = FSMState.JOB_PAGE
+        terminal_reason: Optional[TerminalReason] = None
+        transitions: List[str] = []
+        buttons_clicked: List[str] = []
+        self._recovery_attempts = 0
+
+        logger.info(f"--- Starting Application: {job.company} - {job.title} ---")
+
+        try:
+            await self.page.goto(job.url, wait_until="domcontentloaded", timeout=45000)
+            await self.page.wait_for_timeout(2000)
+
+            if "checkpoint" in self.page.url or "login" in self.page.url:
+                state = FSMState.SKIPPED
+                terminal_reason = TerminalReason.SECURITY_CHECKPOINT
+
+            for _ in range(25):  # hard cap on steps per job
+                transitions.append(state.name)
+
+                if state == FSMState.JOB_PAGE:
+                    ea_btn = await self._find_ea_button_robust()
+                    if not ea_btn:
+                        state, terminal_reason = FSMState.SKIPPED, TerminalReason.NO_EASY_APPLY
+                        continue
+                    await self._click_robustly(ea_btn)
+                    buttons_clicked.append("EASY_APPLY")
+                    try:
+                        await self.page.locator(MODAL_SELECTOR).first.wait_for(state="visible", timeout=10000)
+                    except Exception:
+                        # Easy Apply sometimes opens an external site in a new tab
+                        state, terminal_reason = FSMState.SKIPPED, TerminalReason.EXTERNAL_REDIRECT
+                        continue
+                    state = FSMState.EASY_APPLY_MODAL_OPEN
+
+                elif state in (FSMState.EASY_APPLY_MODAL_OPEN, FSMState.STEP_IN_PROGRESS, FSMState.REVIEW):
+                    modal = self.page.locator(MODAL_SELECTOR).first
+                    if not await modal.count() or not await modal.is_visible():
+                        state, terminal_reason = FSMState.SKIPPED, TerminalReason.STUCK
+                        continue
+
+                    # Resume step: attach resume if LinkedIn asks for it
+                    if not await self._ensure_resume_selected(modal):
+                        state, terminal_reason = FSMState.SKIPPED, TerminalReason.UPLOAD_FAILED
+                        continue
+
+                    reason = await self._screening_reason(modal)
+                    if reason:
+                        logger.info(f"  Skip: {reason}")
+                        state = FSMState.SKIPPED
+                        terminal_reason = (TerminalReason.COVER_LETTER_REQUIRED
+                                           if "cover letter" in reason.lower()
+                                           else TerminalReason.SCREENING_QUESTIONS)
+                        continue
+
+                    btn, btn_type = await self._find_priority_button(modal)
+                    if not btn:
+                        if await self._attempt_recovery(modal, job):
+                            continue
+                        state, terminal_reason = FSMState.SKIPPED, TerminalReason.STUCK
+                        continue
+
+                    if await btn.is_disabled():
+                        state, terminal_reason = FSMState.SKIPPED, TerminalReason.NEXT_DISABLED
+                        continue
+
+                    old_fp = await self._get_modal_fingerprint(modal)
+                    await self._click_robustly(btn)
+                    buttons_clicked.append(btn_type)
+                    await self.page.wait_for_timeout(2000)
+
+                    if btn_type == "SUBMIT":
+                        state = FSMState.SUBMIT_CLICKED
+                        continue
+
+                    # LinkedIn shows inline errors when a required field is empty
+                    if await self._has_inline_errors(modal):
+                        state, terminal_reason = FSMState.SKIPPED, TerminalReason.SCREENING_QUESTIONS
+                        continue
+
+                    new_fp = await self._get_modal_fingerprint(modal)
+                    if new_fp == old_fp:
+                        logger.warning(f"  No progress detected after clicking {btn_type}")
+                        if await self._attempt_recovery(modal, job):
+                            continue
+                        state, terminal_reason = FSMState.SKIPPED, TerminalReason.STUCK
+                        continue
+
+                    self._recovery_attempts = 0
+                    state = FSMState.REVIEW if btn_type == "REVIEW" else FSMState.STEP_IN_PROGRESS
+
+                elif state == FSMState.SUBMIT_CLICKED:
+                    if await self._wait_for_success_proof(timeout_ms=10000):
+                        state, terminal_reason = FSMState.SUBMITTED, TerminalReason.SUBMITTED
+                    else:
+                        state, terminal_reason = FSMState.SKIPPED, TerminalReason.NO_CONFIRMATION
+                        await self._capture_failure_artifacts("no_confirmation")
+
+                elif state == FSMState.SUBMITTED:
+                    app.status = ApplicationStatus.SUBMITTED
+                    app.submission_timestamp = datetime.now()
+                    await self._close_modal_if_open(discard=False)
+                    break
+
+                elif state == FSMState.SKIPPED:
+                    app.status = ApplicationStatus.SKIPPED
+                    app.error_message = terminal_reason.value if terminal_reason else "Unknown"
+                    await self._close_modal_if_open(discard=True)
+                    break
+            else:
+                app.status = ApplicationStatus.SKIPPED
+                app.error_message = TerminalReason.STUCK.value
+                await self._close_modal_if_open(discard=True)
+
+            self._log_terminal_state(job, transitions, terminal_reason, buttons_clicked)
+            return app
+
+        except Exception as e:
+            logger.exception(f"Unexpected error on {job.url}: {e}")
+            app.status = ApplicationStatus.FAILED
+            app.error_message = f"{type(e).__name__}: {e}"
+            try:
+                await self._capture_failure_artifacts("exception")
+                await self._close_modal_if_open(discard=True)
+            except Exception:
+                pass
+            return app
+
+    # Kept for the web backend, which calls this name.
+    async def submit_application(self, job: Job, resume_path: str) -> Application:
+        return await self.apply_to_linkedin_job(job, resume_path)
+
+    # -------------------------------------------------------- button finding
+
+    async def _find_ea_button_robust(self) -> Optional[Locator]:
+        """Find the Easy Apply button (two passes, same selectors as the guard)."""
+        logger.info("Starting Easy Apply detection...")
+        for attempt in range(2):
+            await self._wait_for_content_settle()
+            for selector in EASY_APPLY_SELECTORS:
+                try:
+                    btn = self.page.locator(selector).first
+                    if not await btn.count() or not await btn.is_visible():
+                        continue
+                    label = ((await btn.inner_text()) + " " + (await btn.get_attribute("aria-label") or "")).lower()
+                    if any(w in label for w in DENIED_BUTTON_WORDS):
+                        continue
+                    # Same element id is used for the external "Apply" button;
+                    # only "Easy Apply" stays inside LinkedIn.
+                    if "easy apply" not in label:
+                        continue
+                    logger.info(f"Found Easy Apply button via: {selector}")
+                    return btn
+                except Exception as e:
+                    logger.debug(f"Selector {selector} failed: {e}")
+            if attempt == 0:
+                await self.page.wait_for_timeout(1500)
+
+        logger.error("Easy Apply button NOT FOUND after 2 attempts")
+        await self._capture_failure_artifacts("no_easy_apply_button")
+        return None
+
+    async def _find_priority_button(self, modal: Locator) -> Tuple[Optional[Locator], Optional[str]]:
+        """Priority: Submit application > Review > Next/Continue. Only inside the dialog."""
+        checks = [
+            ('button[aria-label*="Submit application" i]', "SUBMIT"),
+            ('button:has-text("Submit application")', "SUBMIT"),
+            ('button[aria-label*="Review your application" i]', "REVIEW"),
+            ('button:has-text("Review")', "REVIEW"),
+            ('button[aria-label*="Continue to next step" i]', "NEXT"),
+            ('button:has-text("Next")', "NEXT"),
+            ('button:has-text("Continue")', "NEXT"),
+        ]
+        for selector, kind in checks:
+            loc = modal.locator(selector).first
+            try:
+                if await loc.count() and await loc.is_visible():
+                    return loc, kind
+            except Exception:
+                continue
+        return None, None
+
+    # ------------------------------------------------------ step inspection
+
+    async def _field_label(self, modal: Locator, field: Locator) -> str:
+        """Best-effort human label for an input/select/textarea."""
+        parts = []
+        try:
+            parts.append(await field.get_attribute("aria-label") or "")
+            fid = await field.get_attribute("id")
+            if fid:
+                lab = modal.locator(f'label[for="{fid}"]').first
+                if await lab.count():
+                    parts.append(await lab.inner_text())
+            # legend of the enclosing fieldset (radio groups)
+            parts.append(await field.evaluate(
+                "el => { const fs = el.closest('fieldset'); const lg = fs && fs.querySelector('legend'); return lg ? lg.innerText : ''; }"
+            ))
+        except Exception:
+            pass
+        return " ".join(p for p in parts if p).strip().lower()
+
+    async def _screening_reason(self, modal: Locator) -> Optional[str]:
+        """
+        Return a reason string if this step contains a real screening question,
+        or None if the step only has contact info / resume / consent items.
+        """
+        # Free-text answers (cover letter, "why do you want...") -> always skip
+        for ta in await modal.locator("textarea").all():
+            if await ta.is_visible():
+                label = await self._field_label(modal, ta)
+                if "cover letter" in label:
+                    return "Cover letter required"
+                return f"Free-text question: '{label[:60]}'"
+
+        # Text inputs and dropdowns: allowed only if they are contact fields
+        fields = await modal.locator(
+            'input[type="text"], input[type="email"], input[type="tel"], input[type="number"], input:not([type]), select'
+        ).all()
+        for f in fields:
+            if not await f.is_visible():
+                continue
+            label = await self._field_label(modal, f)
+            if any(w in label for w in CONTACT_FIELD_WORDS):
+                continue
+            return f"Question field: '{label[:60] or 'unlabeled'}'"
+
+        # Radio buttons: allowed only for choosing which resume to send
+        for r in await modal.locator('input[type="radio"]').all():
+            label = await self._field_label(modal, r)
+            in_resume_picker = await r.evaluate(
+                "el => !!el.closest('[class*=\"document\"], [class*=\"resume\"], [class*=\"jobs-resume\"]')"
+            )
+            if in_resume_picker or "resume" in label or ".pdf" in label or ".docx" in label:
+                continue
+            return f"Multiple-choice question: '{label[:60] or 'unlabeled'}'"
+
+        # Checkboxes: allowed only for consent / follow-company
+        for c in await modal.locator('input[type="checkbox"]').all():
+            label = await self._field_label(modal, c)
+            if not label:
+                try:
+                    label = (await c.evaluate("el => (el.closest('label') || el.parentElement).innerText") or "").lower()
+                except Exception:
+                    label = ""
+            if any(w in label for w in SAFE_CHECKBOX_WORDS):
+                continue
+            return f"Checkbox question: '{label[:60] or 'unlabeled'}'"
+
+        return None
+
+    # Backwards-compatible name used by older code/tests
+    async def _is_screening_required(self, modal: Locator) -> bool:
+        return await self._screening_reason(modal) is not None
+
+    async def _ensure_resume_selected(self, modal: Locator) -> bool:
+        """
+        If this step asks for a resume, make sure one is attached.
+        Returns False only if an upload was required and failed.
+        """
+        file_inputs = modal.locator('input[type="file"]')
+        if not await file_inputs.count():
+            return True  # not a resume step
+
+        # Already a resume chosen (LinkedIn remembers your last upload)
+        chosen = modal.locator(
+            'input[type="radio"]:checked, [aria-label*="Selected" i][class*="document"], '
+            '[class*="jobs-document-upload-redesign-card__container--selected"]'
+        )
+        if await chosen.count():
+            return True
+
+        # A previous resume card exists but isn't selected: pick the first one
+        first_radio = modal.locator('input[type="radio"]').first
+        if await first_radio.count():
+            try:
+                await first_radio.check(force=True)
+                return True
+            except Exception:
+                pass
+
+        if not self.resume_path or not Path(self.resume_path).exists():
+            logger.error(f"  Resume file not found: {self.resume_path}")
+            return False
+        try:
+            await file_inputs.first.set_input_files(str(Path(self.resume_path).absolute()))
+            await self.page.wait_for_timeout(3000)
+            logger.info("  Resume uploaded")
+            return True
+        except Exception as e:
+            logger.error(f"  Resume upload failed: {e}")
+            return False
+
+    async def _get_modal_fingerprint(self, modal: Locator) -> str:
+        """Hash of the dialog's visible text, used to detect 'nothing happened'."""
+        try:
+            text = await modal.inner_text()
+        except Exception:
+            text = ""
+        return hashlib.md5(text.encode("utf-8", "ignore")).hexdigest()
+
+    async def _has_inline_errors(self, modal: Locator) -> bool:
+        try:
+            err = modal.locator('.artdeco-inline-feedback--error, [role="alert"]:visible')
+            return await err.count() > 0
+        except Exception:
+            return False
+
+    async def _click_robustly(self, btn: Locator):
+        """Scroll into view, normal click; fall back to force click, then JS click."""
+        try:
+            await btn.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            pass
+        try:
+            await btn.click(timeout=5000)
+            return
+        except Exception:
+            pass
+        try:
+            await btn.click(force=True, timeout=5000)
+            return
+        except Exception:
+            pass
+        await btn.evaluate("el => el.click()")
+
+    async def _attempt_recovery(self, modal: Locator, job: Job) -> bool:
+        self._recovery_attempts += 1
+        if self._recovery_attempts > 2:
+            return False
+        logger.warning(f"  Recovery attempt {self._recovery_attempts} for {job.company}")
+        try:
+            await modal.evaluate(
+                "el => { const c = el.querySelector('.artdeco-modal__content') || el; c.scrollTop = c.scrollHeight; }"
+            )
+        except Exception:
+            pass
+        await self.page.wait_for_timeout(1500)
+        return True
+
+    # ----------------------------------------------------------- success
+
+    async def _detect_success_proof(self) -> bool:
+        """
+        Only VISIBLE confirmation counts:
+        - a dialog saying 'Application sent' / 'Your application was submitted'
+        - or the top card now showing an 'Applied' status line
+        """
+        try:
+            dialogs = self.page.locator(MODAL_SELECTOR)
+            for i in range(await dialogs.count()):
+                d = dialogs.nth(i)
+                if await d.is_visible() and SUCCESS_PATTERNS.search(await d.inner_text() or ""):
+                    return True
+            applied = self.page.locator(
+                '.artdeco-inline-feedback--success:visible, .jobs-s-apply__application-link:visible'
+            )
+            if await applied.count():
+                txt = (await applied.first.inner_text() or "").lower()
+                if "applied" in txt or "submitted" in txt:
+                    return True
+        except Exception:
+            pass
+        return False
+
+    async def _wait_for_success_proof(self, timeout_ms: int = 10000) -> bool:
+        waited = 0
+        while waited < timeout_ms:
+            if await self._detect_success_proof():
+                return True
+            await self.page.wait_for_timeout(1000)
+            waited += 1000
+        return False
+
+    # ------------------------------------------------------------- cleanup
+
+    async def _close_modal_if_open(self, discard: bool = True):
+        """Close the dialog. When skipping, LinkedIn asks 'Save this application?' -> Discard."""
+        for _ in range(3):
+            modal = self.page.locator(MODAL_SELECTOR).first
+            if not await modal.count() or not await modal.is_visible():
+                return
+            if discard:
+                discard_btn = self.page.locator(
+                    'button[data-control-name="discard_application_confirm_btn"], '
+                    f'{MODAL_SELECTOR} button:has-text("Discard")'
+                ).first
+                if await discard_btn.count() and await discard_btn.is_visible():
+                    await discard_btn.click(force=True)
+                    await self.page.wait_for_timeout(1000)
+                    continue
+            close = self.page.locator(
+                f'{MODAL_SELECTOR} button:has-text("Done"), {MODAL_SELECTOR} button[aria-label*="Dismiss" i], .artdeco-modal__dismiss'
+            ).first
+            if await close.count() and await close.is_visible():
+                await close.click(force=True)
+                await self.page.wait_for_timeout(1000)
+            else:
+                return
+
+    async def _wait_for_content_settle(self):
+        await self.page.wait_for_load_state("domcontentloaded")
+        await self.page.wait_for_timeout(500)
+        try:
+            await self.page.wait_for_load_state("networkidle", timeout=5000)
+        except Exception:
+            pass
+
+    async def _capture_failure_artifacts(self, reason: str):
+        """Screenshot + list of visible buttons, saved to data/."""
+        ts = int(time.time())
+        Path("data").mkdir(exist_ok=True)
+        try:
+            await self.page.screenshot(path=f"data/failure_{reason}_{ts}.png")
+        except Exception as e:
+            logger.error(f"Failed to capture screenshot: {e}")
+        try:
+            lines = []
+            for i, btn in enumerate((await self.page.get_by_role("button").all())[:40]):
+                try:
+                    if await btn.is_visible():
+                        text = (await btn.inner_text() or "").strip().replace("\n", " ")
+                        aria = (await btn.get_attribute("aria-label") or "").strip()
+                        bid = await btn.get_attribute("id") or ""
+                        lines.append(f"{i+1}. id='{bid}' text='{text}' aria='{aria}'")
+                except Exception:
+                    continue
+            with open(f"data/button_inventory_{ts}.txt", "w", encoding="utf-8") as f:
+                f.write(f"Reason: {reason}\nURL: {self.page.url}\n\nVISIBLE BUTTONS:\n")
+                f.write("\n".join(lines) or "None")
+        except Exception as e:
+            logger.warning(f"Failed to capture button inventory: {e}")
+
+    def _log_terminal_state(self, job: Job, transitions: List[str], reason: Optional[TerminalReason], buttons: List[str]):
+        logger.info(f"Job: {job.title} @ {job.company}")
+        logger.info(f"States traversed: {' -> '.join(transitions)}")
+        logger.info(f"Buttons clicked: {buttons}")
+        logger.info(f"Final outcome: {reason.value if reason else 'UNKNOWN'}")
+
+    # ------------------------------------------------------------ batch
+
+    def _delay_seconds(self) -> int:
+        app_cfg = self.config.get("application", {})
+        lo = int(app_cfg.get("min_delay", 30))
+        hi = int(app_cfg.get("max_delay", lo))
+        return random.randint(min(lo, hi), max(lo, hi))
+
+    async def apply_to_jobs(self, jobs: List[Job], resume_path: str, context: BrowserContext) -> List[Application]:
+        logger.info(f"Starting execution for {len(jobs)} jobs...")
+        self.context = context
+        if not self.page:
+            self.page = await self.context.new_page()
+        for i, job in enumerate(jobs):
+            if job.platform != Platform.LINKEDIN:
+                continue
+            app = await self.apply_to_linkedin_job(job, resume_path)
+            self.applications.append(app)
+            if i < len(jobs) - 1:
+                delay = self._delay_seconds()
+                logger.info(f"Waiting {delay}s before next application...")
+                await asyncio.sleep(delay)
+        return self.applications
