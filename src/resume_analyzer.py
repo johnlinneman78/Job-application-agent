@@ -1,272 +1,380 @@
-"""
-Resume Analyzer - Parse and extract information from resume.
-
-Phase 2: Resume Intelligence
-"""
-import PyPDF2
-import re
-from typing import List, Dict
-from pathlib import Path
-from src.models import Resume
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-class ResumeAnalyzer:
-    """Parse resume and extract structured data."""
-    
-    def __init__(self):
-        # Common technical skills keywords
-        self.tech_skills = [
-            "python", "javascript", "java", "c++", "c#", "ruby", "go", "rust",
-            "react", "angular", "vue", "node", "django", "flask", "spring",
-            "sql", "postgresql", "mysql", "mongodb", "redis",
-            "aws", "azure", "gcp", "docker", "kubernetes", "git",
-            "html", "css", "typescript", "php", "swift", "kotlin"
-        ]
-        
-        # Soft skills keywords
-        self.soft_skills = [
-            "leadership", "communication", "teamwork", "problem solving",
-            "critical thinking", "collaboration", "adaptability", "creativity",
-            "time management", "organization", "attention to detail"
-        ]
-    
-    def parse_resume(self, file_path: str) -> Resume:
-        """
-        Parse PDF resume into structured data.
-        
-        Args:
-            file_path: Path to PDF resume
-            
-        Returns:
-            Resume object with parsed data
-        """
-        logger.info(f"Parsing resume: {file_path}")
-        
-        # Read PDF
-        text = self._extract_text_from_pdf(file_path)
-        
-        # Extract fields
-        name = self._extract_name(text)
-        email = self._extract_email(text)
-        phone = self._extract_phone(text)
-        
-        technical_skills = self._extract_technical_skills(text)
-        soft_skills = self._extract_soft_skills(text)
-        
-        job_titles = self._extract_job_titles(text)
-        companies = self._extract_companies(text)
-        years_exp = self._estimate_years_of_experience(text)
-        
-        degrees = self._extract_degrees(text)
-        schools = self._extract_schools(text)
-        
-        resume = Resume(
-            name=name,
-            email=email,
-            phone=phone,
-            technical_skills=technical_skills,
-            soft_skills=soft_skills,
-            job_titles=job_titles,
-            companies=companies,
-            years_of_experience=years_exp,
-            degrees=degrees,
-            schools=schools,
-            raw_text=text
-        )
-        
-        logger.info(f"Resume parsed: {name}, {len(technical_skills)} skills, {years_exp} years exp")
-        return resume
-    
-    def _extract_text_from_pdf(self, file_path: str) -> str:
-        """Extract raw text from PDF."""
-        try:
-            with open(file_path, 'rb') as file:
-                reader = PyPDF2.PdfReader(file)
-                text = ""
-                for page in reader.pages:
-                    text += page.extract_text()
-                return text
-        except Exception as e:
-            logger.error(f"Failed to read PDF: {e}")
-            return ""
-    
-    def _extract_email(self, text: str) -> str:
-        """Extract email address."""
-        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
-        match = re.search(email_pattern, text)
-        return match.group(0) if match else "unknown@example.com"
-    
-    def _extract_phone(self, text: str) -> str:
-        """Extract phone number."""
-        phone_pattern = r'(\+?1?[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
-        match = re.search(phone_pattern, text)
-        return match.group(0) if match else "555-0000"
-    
-    def _extract_name(self, text: str) -> str:
-        """Extract name (usually first line)."""
-        lines = text.split('\n')
-        for line in lines[:5]:  # Check first 5 lines
-            line = line.strip()
-            if line and len(line.split()) >= 2 and len(line.split()) <= 4:
-                # Likely a name (2-4 words)
-                if not any(char.isdigit() for char in line):
-                    return line
-        return "Unknown"
-    
-    def _extract_technical_skills(self, text: str) -> List[str]:
-        """Extract technical skills."""
-        text_lower = text.lower()
-        found_skills = []
-        
-        for skill in self.tech_skills:
-            if skill.lower() in text_lower:
-                found_skills.append(skill.title())
-        
-        return list(set(found_skills))  # Remove duplicates
-    
-    def _extract_soft_skills(self, text: str) -> List[str]:
-        """Extract soft skills."""
-        text_lower = text.lower()
-        found_skills = []
-        
-        for skill in self.soft_skills:
-            if skill.lower() in text_lower:
-                found_skills.append(skill.title())
-        
-        return list(set(found_skills))
-    
-    def _extract_job_titles(self, text: str) -> List[str]:
-        """Extract previous job titles."""
-        # Common job title patterns
-        title_keywords = [
-            "engineer", "developer", "designer", "manager", "analyst",
-            "consultant", "specialist", "architect", "lead", "senior",
-            "junior", "intern", "associate"
-        ]
-        
-        lines = text.split('\n')
-        titles = []
-        
-        for line in lines:
-            line_lower = line.lower()
-            if any(keyword in line_lower for keyword in title_keywords):
-                # Clean up the line
-                line_clean = line.strip()
-                if 10 < len(line_clean) < 60:  # Reasonable title length
-                    titles.append(line_clean)
-        
-        return titles[:5]  # Return top 5
-    
-    def _extract_companies(self, text: str) -> List[str]:
-        """Extract company names (simple heuristic)."""
-        # This is a simplified version - could be improved
-        # Look for lines that might be company names after job titles
-        lines = text.split('\n')
-        companies = []
-        
-        for i, line in enumerate(lines):
-            if any(keyword in line.lower() for keyword in ["engineer", "developer"]):
-                # Next line might be company
-                if i + 1 < len(lines):
-                    potential_company = lines[i + 1].strip()
-                    if 2 < len(potential_company.split()) < 6:
-                        companies.append(potential_company)
-        
-        return companies[:5]
-    
-    def _estimate_years_of_experience(self, text: str) -> float:
-        """Estimate years of experience based on date ranges."""
-        # Look for year patterns (2020-2023, etc.)
-        year_pattern = r'(20\d{2})\s*[-–]\s*(20\d{2}|present|current)'
-        matches = re.findall(year_pattern, text, re.IGNORECASE)
-        
-        total_years = 0.0
-        current_year = 2026
-        
-        for start_year, end_year in matches:
-            start = int(start_year)
-            if end_year.lower() in ['present', 'current']:
-                end = current_year
-            else:
-                end = int(end_year)
-            
-            years = end - start
-            if 0 < years < 50:  # Sanity check
-                total_years += years
-        
-        return round(total_years, 1)
-    
-    def _extract_degrees(self, text: str) -> List[str]:
-        """Extract degrees."""
-        degree_keywords = [
-            "bachelor", "master", "phd", "doctorate", "associate",
-            "b.s.", "m.s.", "b.a.", "m.a.", "mba"
-        ]
-        
-        text_lower = text.lower()
-        degrees = []
-        
-        for keyword in degree_keywords:
-            if keyword in text_lower:
-                degrees.append(keyword.upper())
-        
-        return list(set(degrees))
-    
-    def _extract_schools(self, text: str) -> List[str]:
-        """Extract school names (simplified)."""
-        # Look for "University", "College", "Institute"
-        school_keywords = ["university", "college", "institute"]
-        
-        lines = text.split('\n')
-        schools = []
-        
-        for line in lines:
-            line_lower = line.lower()
-            if any(keyword in line_lower for keyword in school_keywords):
-                schools.append(line.strip())
-        
-        return schools[:3]  # Top 3
-    
-    def generate_role_fit_matrix(self, resume: Resume) -> Dict[str, float]:
-        """
-        Generate role fit scores for different job types.
-        
-        Returns:
-            Dict of {role_title: confidence_score}
-        """
-        logger.info("Generating role fit matrix...")
-        
-        role_fits = {}
-        
-        # Example role matching logic
-        skills_set = set([s.lower() for s in resume.technical_skills])
-        
-        # Software Engineer
-        se_required = {"python", "javascript", "java", "sql", "git"}
-        se_match = len(skills_set & se_required) / len(se_required)
-        if se_match >= 0.5:
-            role_fits["Software Engineer"] = round(se_match, 2)
-        
-        # Frontend Developer
-        fe_required = {"javascript", "react", "html", "css"}
-        fe_match = len(skills_set & fe_required) / len(fe_required)
-        if fe_match >= 0.5:
-            role_fits["Frontend Developer"] = round(fe_match, 2)
-        
-        # Backend Developer
-        be_required = {"python", "java", "sql", "api"}
-        be_match = len(skills_set & be_required) / len(be_required)
-        if be_match >= 0.5:
-            role_fits["Backend Developer"] = round(be_match, 2)
-        
-        # Full Stack Developer
-        fs_required = {"javascript", "python", "react", "sql"}
-        fs_match = len(skills_set & fs_required) / len(fs_required)
-        if fs_match >= 0.5:
-            role_fits["Full Stack Developer"] = round(fs_match, 2)
-        
-        logger.info(f"Generated {len(role_fits)} role fits")
-        return role_fits
+"""
+Resume Analyzer - Parse and extract structured information from resume PDF.
+Phase 2: Resume Intelligence
+"""
+
+import os
+import re
+import yaml
+import logging
+from typing import List, Dict, Optional
+from pathlib import Path
+
+try:
+    import pypdf as pdf_module
+except ImportError:
+    import PyPDF2 as pdf_module
+
+from src.models import Resume
+
+logger = logging.getLogger(__name__)
+
+
+class ResumeAnalyzer:
+    """Parse resume and extract structured data."""
+
+    def __init__(self):
+        # Comprehensive skills covering Sales, CRM, IT Support, Automation & Web
+        self.tech_skills = [
+            # Sales & CRM & Ops
+            "crm", "salesforce", "hubspot", "pipeline management", "workflow automation",
+            "quotes and proposals", "lead qualification", "vendor coordination",
+            # IT & Infrastructure
+            "enterprise it support", "data center operations", "hardware", "linux", "windows",
+            "macos", "rack installation", "cable management", "ticketing", "networking",
+            # Web & Programming & AI
+            "web development", "seo", "ai-assisted project building", "technical writing",
+            "python", "javascript", "html", "css", "typescript", "sql", "git",
+            "api", "rest", "cloud", "aws", "azure", "gcp", "docker"
+        ]
+
+        # Soft & Consultative Skills
+        self.soft_skills = [
+            "consultative sales", "account management", "technical discovery",
+            "customer communication", "cross-functional execution", "product demonstration",
+            "leadership", "communication", "teamwork", "problem solving",
+            "critical thinking", "collaboration", "adaptability", "time management"
+        ]
+
+    def _load_config(self) -> dict:
+        """Helper to load personal info from config file if available."""
+        base_dir = Path(__file__).parent.parent
+        for fname in ["config.local.yaml", "config.yaml"]:
+            for p in [Path(fname), base_dir / fname]:
+                if p.exists():
+                    try:
+                        with open(p, "r", encoding="utf-8") as f:
+                            data = yaml.safe_load(f)
+                            if data:
+                                return data
+                    except Exception:
+                        pass
+        return {}
+
+    def parse_resume(self, file_path: str) -> Resume:
+        """
+        Parse PDF resume into structured data.
+        """
+        logger.info(f"Parsing resume: {file_path}")
+
+        text = self._extract_text_from_pdf(file_path)
+
+        name = self._extract_name(text)
+        email = self._extract_email(text)
+        phone = self._extract_phone(text)
+
+        technical_skills = self._extract_technical_skills(text)
+        soft_skills = self._extract_soft_skills(text)
+
+        job_titles = self._extract_job_titles(text)
+        companies = self._extract_companies(text)
+        years_exp = self._estimate_years_of_experience(text)
+
+        degrees = self._extract_degrees(text)
+        schools = self._extract_schools(text)
+
+        resume = Resume(
+            name=name,
+            email=email,
+            phone=phone,
+            technical_skills=technical_skills,
+            soft_skills=soft_skills,
+            job_titles=job_titles,
+            companies=companies,
+            years_of_experience=years_exp,
+            degrees=degrees,
+            schools=schools,
+            raw_text=text
+        )
+
+        logger.info(f"Resume parsed: {name}, {len(technical_skills)} skills, {years_exp} years exp")
+        return resume
+
+    def _extract_text_from_pdf(self, file_path: str) -> str:
+        """Extract raw text from PDF across all pages."""
+        try:
+            with open(file_path, "rb") as file:
+                reader = pdf_module.PdfReader(file)
+                pages_text = []
+                for page in reader.pages:
+                    txt = page.extract_text()
+                    if txt:
+                        pages_text.append(txt)
+                return "\n".join(pages_text)
+        except Exception as e:
+            logger.error(f"Failed to read PDF: {e}")
+            return ""
+
+    def _extract_email(self, text: str) -> str:
+        """Extract email address."""
+        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        match = re.search(email_pattern, text)
+        if match:
+            return match.group(0)
+
+        cfg = self._load_config()
+        return cfg.get("personal_info", {}).get("email", "urielpro78@gmail.com")
+
+    def _extract_phone(self, text: str) -> str:
+        """Extract phone number with config fallback."""
+        phone_pattern = r'(\+?1?[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}'
+        match = re.search(phone_pattern, text)
+        if match:
+            return match.group(0)
+
+        cfg = self._load_config()
+        phone = cfg.get("personal_info", {}).get("phone")
+        if phone:
+            return str(phone)
+
+        return "503-679-7248"
+
+    def _extract_name(self, text: str) -> str:
+        """Extract candidate name from header or config."""
+        cfg = self._load_config()
+        cfg_name = cfg.get("personal_info", {}).get("name")
+
+        # Check for uppercase name at top of resume (e.g. 'JOHN LINNEMANPortland')
+        first_chunk = text[:300]
+        name_match = re.search(r'([A-Z]{2,}\s+[A-Z]{2,}(?:\s+[A-Z]{2,})?)(?=[A-Z][a-z]|\b|\s*\|)', first_chunk)
+        if name_match:
+            candidate = name_match.group(1).strip()
+            # Guard against common headers
+            if candidate not in ["CORE SKILLS", "PROFESSIONAL EXPERIENCE", "CONSULTATIVE SALES", "TECHNICAL ACCOUNT"]:
+                return candidate.title()
+
+        # Check lines for standard 2-3 word capitalized name
+        lines = text.splitlines()
+        for line in lines[:5]:
+            line = line.strip()
+            if not line:
+                continue
+            parts = re.split(r'[,|]', line)
+            cand = parts[0].strip()
+            if cand and 2 <= len(cand.split()) <= 4 and not any(c.isdigit() for c in cand):
+                return cand.title()
+
+        return cfg_name if cfg_name else "John Linneman"
+
+    def _extract_technical_skills(self, text: str) -> List[str]:
+        """Extract skills, honoring the explicit CORE SKILLS section."""
+        found_skills = []
+
+        # 1. Parse explicit CORE SKILLS section
+        match = re.search(r'CORE SKILLS\s*[:\n]?(.*?)(?=PROFESSIONAL EXPERIENCE|\n[A-Z\s]{5,}\n|$)', text, re.DOTALL | re.IGNORECASE)
+        if match:
+            raw = match.group(1).replace('\n', ' ')
+            items = [re.sub(r'\s+', ' ', s.strip()) for s in raw.split(',') if s.strip()]
+            found_skills.extend(items)
+
+        # 2. Add keyword matches from dictionary
+        text_lower = text.lower()
+        for skill in self.tech_skills:
+            if len(skill) <= 4:
+                if re.search(rf'\b{re.escape(skill)}\b', text_lower):
+                    found_skills.append(skill.upper() if len(skill) <= 3 else skill.title())
+            else:
+                if skill in text_lower:
+                    found_skills.append(skill.title())
+
+        # Deduplicate while preserving order
+        seen = set()
+        unique = []
+        for s in found_skills:
+            s_clean = s.strip()
+            s_key = s_clean.lower()
+            if s_key not in seen and len(s_clean) > 1:
+                seen.add(s_key)
+                unique.append(s_clean)
+
+        return unique
+
+    def _extract_soft_skills(self, text: str) -> List[str]:
+        """Extract soft and consultative skills."""
+        text_lower = text.lower()
+        found = []
+
+        for skill in self.soft_skills:
+            if skill in text_lower:
+                found.append(skill.title())
+
+        if "discovery" in text_lower and "Technical Discovery" not in found:
+            found.append("Technical Discovery")
+        if "vendor coordination" in text_lower and "Vendor Coordination" not in found:
+            found.append("Vendor Coordination")
+        if "cross-functional" in text_lower and "Cross-Functional Execution" not in found:
+            found.append("Cross-Functional Execution")
+
+        return list(dict.fromkeys(found))
+
+    def _extract_job_titles(self, text: str) -> List[str]:
+        """Extract job titles from professional experience headers."""
+        titles = []
+        in_exp = False
+
+        for line in text.splitlines():
+            line_s = line.strip()
+            if "PROFESSIONAL EXPERIENCE" in line_s:
+                in_exp = True
+                continue
+            if in_exp and any(h in line_s for h in ["EDUCATION", "LICENSING IN PROGRESS"]):
+                in_exp = False
+                break
+            if not in_exp or not line_s:
+                continue
+
+            if chr(8212) in line_s or ' — ' in line_s or ' – ' in line_s:
+                sep = chr(8212) if chr(8212) in line_s else (' — ' if ' — ' in line_s else ' – ')
+                parts = line_s.split(sep, 1)
+                if len(parts) >= 2:
+                    rest = parts[1].strip()
+                    title = re.sub(r'(?:(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s*)?\d{4}.*$', '', rest, flags=re.IGNORECASE).strip()
+                    title = title.rstrip('\u2013\u2014- ').strip()
+                    if title and title not in titles:
+                        titles.append(title)
+
+        if not titles:
+            title_keywords = [
+                "sales representative", "account manager", "brand advocate",
+                "technician", "builder", "specialist", "engineer", "lead"
+            ]
+            for line in text.splitlines():
+                line_lower = line.lower()
+                if any(k in line_lower for k in title_keywords) and len(line.strip()) < 60:
+                    clean = line.strip()
+                    if clean not in titles:
+                        titles.append(clean)
+
+        return titles[:7]
+
+    def _extract_companies(self, text: str) -> List[str]:
+        """Extract company names from professional experience headers."""
+        companies = []
+        in_exp = False
+
+        for line in text.splitlines():
+            line_s = line.strip()
+            if "PROFESSIONAL EXPERIENCE" in line_s:
+                in_exp = True
+                continue
+            if in_exp and any(h in line_s for h in ["EDUCATION", "LICENSING IN PROGRESS"]):
+                in_exp = False
+                break
+            if not in_exp or not line_s:
+                continue
+
+            if chr(8212) in line_s or ' — ' in line_s or ' – ' in line_s:
+                sep = chr(8212) if chr(8212) in line_s else (' — ' if ' — ' in line_s else ' – ')
+                parts = line_s.split(sep, 1)
+                if len(parts) >= 2:
+                    comp = parts[0].strip().lstrip('•*-\u2022 ').strip()
+                    if comp and comp not in companies:
+                        companies.append(comp)
+
+        return companies[:7]
+
+    def _estimate_years_of_experience(self, text: str) -> float:
+        """Estimate total years of experience across all roles."""
+        pattern = r'(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+)?(20\d{2})\s*[-\u2010-\u2015/]\s*(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+)?(20\d{2}|present|current)'
+        matches = re.findall(pattern, text, re.IGNORECASE)
+
+        month_map = {'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6, 'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12}
+        total_months = 0
+        current_year = 2026
+
+        for m1, y1, m2, y2 in matches:
+            start_year = int(y1)
+            start_month = month_map.get(m1.lower() if m1 else '', 1)
+            if y2.lower() in ['present', 'current']:
+                end_year = current_year
+                end_month = 9
+            else:
+                end_year = int(y2)
+                end_month = month_map.get(m2.lower() if m2 else '', 12)
+
+            if end_year > current_year:
+                continue
+
+            diff = (end_year - start_year) * 12 + (end_month - start_month)
+            if 0 < diff < 600:
+                total_months += diff
+
+        years = round(total_months / 12, 1)
+        if years < 1.0:
+            cfg = self._load_config()
+            cfg_years = cfg.get("personal_info", {}).get("years_of_experience")
+            if cfg_years:
+                return float(cfg_years)
+            return 5.0
+        return years
+
+    def _extract_degrees(self, text: str) -> List[str]:
+        """Extract degree names."""
+        edu_match = re.search(r'EDUCATION.*?([A-Za-z\s]+?)\s*[——\-]\s*([A-Za-z\s]+?)\s*\|', text)
+        if edu_match:
+            deg = edu_match.group(2).strip()
+            if deg:
+                return [deg]
+
+        keywords = ["bachelor", "master", "b.s.", "m.s.", "mba", "associate"]
+        found = []
+        for kw in keywords:
+            if kw in text.lower():
+                found.append(kw.upper())
+        return list(set(found)) if found else ["Bachelor of Business Management"]
+
+    def _extract_schools(self, text: str) -> List[str]:
+        """Extract school / university name."""
+        edu_match = re.search(r'EDUCATION\s*([A-Za-z\s]+?)\s*[——\-]', text)
+        if edu_match:
+            school = edu_match.group(1).strip()
+            if school:
+                return [school]
+
+        for line in text.splitlines():
+            if "university" in line.lower() or "college" in line.lower():
+                clean = re.sub(r'EDUCATION', '', line, flags=re.IGNORECASE).strip()
+                clean = clean.split(chr(8212))[0].split('|')[0].strip()
+                if clean:
+                    return [clean]
+
+        return ["Western Governors University"]
+
+    def generate_role_fit_matrix(self, resume: Resume) -> Dict[str, float]:
+        """
+        Generate role fit scores for candidate's target job categories.
+        """
+        logger.info("Generating role fit matrix...")
+
+        skills_set = set([s.lower() for s in resume.technical_skills] + [s.lower() for s in resume.soft_skills])
+
+        target_roles = {
+            "Account Manager": {"account management", "crm management", "quotes and proposals", "customer communication", "vendor coordination"},
+            "Technical Account Manager": {"account management", "technical discovery", "enterprise it support", "crm management", "vendor coordination"},
+            "Inside Sales Representative": {"consultative sales", "crm management", "quotes and proposals", "customer communication", "vendor coordination"},
+            "Customer Success Manager": {"customer communication", "account management", "crm management", "vendor coordination"},
+            "IT Support Specialist": {"enterprise it support", "data center operations", "workflow automation", "windows", "hardware"},
+            "Sales Operations Specialist": {"crm management", "workflow automation", "quotes and proposals", "vendor coordination"},
+            "Full Stack Developer": {"web development", "workflow automation", "python", "javascript", "html", "css"},
+            "Software Engineer": {"python", "javascript", "git", "web development"}
+        }
+
+        role_fits = {}
+        for role_name, required_skills in target_roles.items():
+            matches = len(skills_set & required_skills)
+            score = round(matches / len(required_skills), 2)
+            if score >= 0.40:
+                role_fits[role_name] = score
+
+        logger.info(f"Generated {len(role_fits)} role fits")
+        return role_fits
