@@ -209,6 +209,10 @@ import asyncio
 # Only one browser task at a time: search and apply share the same saved
 # LinkedIn profile folder, and Chromium locks that folder while it is open.
 browser_lock = asyncio.Lock()
+active_browser_task = None
+active_task_type = None
+active_browser_context = None
+stop_requested = False
 BROWSER_PROFILE_DIR = WORKSPACE_ROOT / "data" / "browser_context"
 
 
@@ -417,6 +421,7 @@ async def trigger_job_search(
     current_user: dict = Depends(get_current_user)
 ):
     """Trigger real job search via the agent."""
+    global active_browser_task, active_task_type, stop_requested
     user_email = current_user["email"]
     config = configs_db.get(user_email)
     
@@ -428,11 +433,17 @@ async def trigger_job_search(
     if not resume_path or not os.path.exists(resume_path):
         raise HTTPException(status_code=400, detail="Resume not found. Please upload a PDF in Settings.")
 
+    if browser_lock.locked() or (active_browser_task and not active_browser_task.done()):
+        task_label = active_task_type or "task"
+        return {"message": f"A {task_label} is already running. Click 'Stop Task' to cancel it if needed."}
+
+    stop_requested = False
+
     async def run_scraper():
-        if browser_lock.locked():
-            logger.warning("Another browser task is running; search not started.")
-            return
+        global active_browser_task, active_task_type, active_browser_context, stop_requested
         async with browser_lock:
+            active_browser_task = asyncio.current_task()
+            active_task_type = "search"
             try:
                 logger.info(f"Starting background scraper for {user_email}")
                 from playwright.async_api import async_playwright
@@ -440,45 +451,53 @@ async def trigger_job_search(
                 executor = ApplicationExecutor(config, guard)
                 scraper = GuardedJobScraper(config, guard)
 
+                # Incremental safe job callback so jobs appear immediately in the queue
+                async def on_safe_job(job):
+                    processed = {
+                        "id": job.job_id,
+                        "title": job.title,
+                        "company": job.company,
+                        "location": job.location,
+                        "url": job.url,
+                        "platform": job.platform.value if hasattr(job.platform, 'value') else str(job.platform),
+                        "match_score": job.match_score,
+                        "status": "queued",
+                        "discovered_at": datetime.now().isoformat()
+                    }
+                    current_list = jobs_db.get(user_email, [])
+                    if not any(x["id"] == job.job_id for x in current_list):
+                        current_list.append(processed)
+                        jobs_db[user_email] = current_list
+                        save_db(jobs_db, JOBS_FILE)
+
                 async with async_playwright() as p:
-                    # Logged-out (headless) LinkedIn hides the Easy Apply filter and
-                    # button, so every job used to fail the guard. Use the saved
-                    # logged-in profile instead.
                     context, page = await open_logged_in_linkedin(p, executor)
                     if not context:
                         return
+                    active_browser_context = context
                     discovered_jobs = await scraper.discover_and_guard_check_jobs(
                         titles=config["search"]["keywords"],
                         locations=config["search"]["locations"],
                         days_ago=config["search"]["posted_within_days"],
                         context=context,
+                        on_job_found=on_safe_job
                     )
                     await context.close()
 
-                processed_jobs = []
-                for j in discovered_jobs:
-                    processed_jobs.append({
-                        "id": j.job_id,
-                        "title": j.title,
-                        "company": j.company,
-                        "location": j.location,
-                        "url": j.url,
-                        "platform": j.platform.value if hasattr(j.platform, 'value') else str(j.platform),
-                        "match_score": j.match_score,
-                        "status": "queued",
-                        "discovered_at": datetime.now().isoformat()
-                    })
-
-                jobs_db[user_email] = processed_jobs
-                save_db(jobs_db, JOBS_FILE)
-                logger.info(f"Scraper finished for {user_email}. Found {len(processed_jobs)} jobs.")
+                logger.info(f"Scraper finished for {user_email}. Total safe jobs in queue: {len(jobs_db.get(user_email, []))}")
+            except asyncio.CancelledError:
+                logger.info(f"Scraper task stopped for {user_email}.")
             except Exception as e:
                 logger.error(f"Scraper task failed for {user_email}: {str(e)}")
                 import traceback
                 traceback.print_exc()
+            finally:
+                active_browser_task = None
+                active_task_type = None
+                active_browser_context = None
 
     background_tasks.add_task(run_scraper)
-    return {"message": "Job search initiated. Check back in ~60s."}
+    return {"message": "Job search started. Matching jobs will appear in your queue live!"}
 
 @app.put("/api/jobs/{job_id}/skip")
 async def skip_job(job_id: str, current_user: dict = Depends(get_current_user)):
@@ -491,6 +510,49 @@ async def skip_job(job_id: str, current_user: dict = Depends(get_current_user)):
             return {"message": "Job skipped", "job": job}
     
     raise HTTPException(status_code=404, detail="Job not found")
+
+@app.get("/api/agent/status")
+async def get_agent_status(current_user: dict = Depends(get_current_user)):
+    """Check running state of browser tasks."""
+    is_running = (active_browser_task is not None and not active_browser_task.done()) or browser_lock.locked()
+    return {
+        "is_running": is_running,
+        "task_type": active_task_type if is_running else None
+    }
+
+@app.post("/api/agent/stop")
+async def stop_agent(current_user: dict = Depends(get_current_user)):
+    """Stop any active search or application task."""
+    global active_browser_task, active_task_type, active_browser_context, stop_requested
+    stop_requested = True
+    stopped = False
+
+    if active_browser_context:
+        try:
+            await active_browser_context.close()
+        except Exception:
+            pass
+        active_browser_context = None
+
+    if active_browser_task and not active_browser_task.done():
+        active_browser_task.cancel()
+        task_name = active_task_type or "task"
+        logger.info(f"Stop signal sent for active {task_name} by {current_user['email']}")
+        stopped = True
+
+    active_browser_task = None
+    active_task_type = None
+
+    return {"message": "Agent task stopped successfully." if stopped else "No active agent task was running."}
+
+@app.post("/api/jobs/reset")
+async def reset_jobs(current_user: dict = Depends(get_current_user)):
+    """Reset and clear discovered jobs queue for current user."""
+    user_email = current_user["email"]
+    jobs_db[user_email] = []
+    save_db(jobs_db, JOBS_FILE)
+    logger.info(f"Jobs queue reset for {user_email}")
+    return {"message": "Queue and search results reset successfully."}
 
 # ==================== APPLICATION ENDPOINTS ====================
 
@@ -519,11 +581,15 @@ async def start_applications(
 
     resume_path = config["personal_info"].get("resume_path")
 
+    if browser_lock.locked() or (active_browser_task and not active_browser_task.done()):
+        task_label = active_task_type or "task"
+        return {"message": f"A {task_label} is already running. Click 'Stop Task' to cancel it if needed."}
+
     async def run_executor():
-        if browser_lock.locked():
-            logger.warning("Another browser task is running; applications not started.")
-            return
+        global active_browser_task, active_task_type, active_browser_context
         async with browser_lock:
+            active_browser_task = asyncio.current_task()
+            active_task_type = "apply"
             try:
                 logger.info(f"Starting executor background task for {user_email}")
                 if not resume_path or not os.path.exists(resume_path):
@@ -542,6 +608,7 @@ async def start_applications(
                     context, page = await open_logged_in_linkedin(p, executor)
                     if not context:
                         return
+                    active_browser_context = context
                     executor.context = context
                     executor.page = page
 
@@ -582,18 +649,27 @@ async def start_applications(
 
                     await context.close()
                 logger.info(f"Executor finished for {user_email}")
+            except asyncio.CancelledError:
+                logger.info(f"Executor stopped by user for {user_email}")
+                for j in queued_jobs:
+                    if j.get("status") == "in_progress":
+                        j["status"] = "queued"
+                save_db(jobs_db, JOBS_FILE)
             except Exception as e:
                 logger.error(f"Executor task failed: {str(e)}")
                 import traceback
                 traceback.print_exc()
-                # Don't leave jobs stuck as "in_progress"
                 for j in queued_jobs:
                     if j.get("status") == "in_progress":
                         j["status"] = "failed"
                 save_db(jobs_db, JOBS_FILE)
+            finally:
+                active_browser_task = None
+                active_task_type = None
+                active_browser_context = None
 
     background_tasks.add_task(run_executor)
-    return {"message": "Agent deployed. Watch terminal/History page for results."}
+    return {"message": "Application submissions started in background."}
 
 @app.get("/api/applications/stats")
 async def get_application_stats(current_user: dict = Depends(get_current_user)):

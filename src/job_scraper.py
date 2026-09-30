@@ -363,7 +363,8 @@ class GuardedJobScraper(JobScraper):
         titles: List[str],
         locations: List[str],
         days_ago: int = 14,
-        context: BrowserContext = None
+        context: BrowserContext = None,
+        on_job_found = None
     ) -> List[Job]:
         """
         Discover jobs AND run guard checks.
@@ -380,19 +381,19 @@ class GuardedJobScraper(JobScraper):
         
         # If context provided, use it (staying in session)
         if context:
-            await self._run_guard_checks(all_jobs, context, safe_jobs)
+            await self._run_guard_checks(all_jobs, context, safe_jobs, on_job_found=on_job_found)
         else:
             # Fallback for headless
             async with async_playwright() as p:
                 headless_browser = await p.chromium.launch(headless=True)
                 headless_context = await headless_browser.new_context()
-                await self._run_guard_checks(all_jobs, headless_context, safe_jobs)
+                await self._run_guard_checks(all_jobs, headless_context, safe_jobs, on_job_found=on_job_found)
                 await headless_browser.close()
         
         logger.info(f"Guard check complete: {len(safe_jobs)}/{len(all_jobs)} jobs safe to apply")
         return safe_jobs
 
-    async def _run_guard_checks(self, all_jobs, context: BrowserContext, safe_jobs, page: Page = None):
+    async def _run_guard_checks(self, all_jobs, context: BrowserContext, safe_jobs, page: Page = None, on_job_found = None):
         """Helper to run guard checks across all jobs."""
         
         should_close_page = False
@@ -457,6 +458,14 @@ class GuardedJobScraper(JobScraper):
                         job.has_easy_apply = True
                         safe_jobs.append(job)
                         logger.info(f"SAFE: {job.title} at {job.company}")
+                        if on_job_found:
+                            try:
+                                if asyncio.iscoroutinefunction(on_job_found):
+                                    await on_job_found(job)
+                                else:
+                                    on_job_found(job)
+                            except Exception as cb_err:
+                                logger.warning(f"Error in on_job_found callback: {cb_err}")
                     else:
                         logger.info(f"✗ SKIP: {guard_result.status} - {guard_result.reason}")
                 

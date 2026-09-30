@@ -81,6 +81,16 @@ const API = {
     method: 'POST'
   }),
 
+  stopAgent: () => API.request('/api/agent/stop', {
+    method: 'POST'
+  }),
+
+  resetQueue: () => API.request('/api/jobs/reset', {
+    method: 'POST'
+  }),
+
+  getAgentStatus: () => API.request('/api/agent/status'),
+
   uploadResume: async (file) => {
     const formData = new FormData()
     formData.append('file', file)
@@ -214,17 +224,22 @@ function Dashboard() {
   const [loading, setLoading] = useState(true)
   const [actionStatus, setActionStatus] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
+  const [agentRunning, setAgentRunning] = useState(false)
+  const [taskType, setTaskType] = useState(null)
 
   const refreshData = async () => {
     try {
-      const [statsData, summaryData] = await Promise.all([
+      const [statsData, summaryData, statusData] = await Promise.all([
         API.request('/api/applications/stats'),
-        API.request('/api/reports/summary')
+        API.request('/api/reports/summary'),
+        API.getAgentStatus()
       ])
       setStats(statsData)
       setSummary(summaryData)
+      setAgentRunning(statusData?.is_running || false)
+      setTaskType(statusData?.task_type || null)
     } catch (err) {
-      console.error('Dashboard fetch failed:', err)
+      console.error('Dashboard refresh failed:', err)
     }
   }
 
@@ -234,6 +249,10 @@ function Dashboard() {
       setLoading(false)
     }
     init()
+
+    // Poll status periodically
+    const interval = setInterval(refreshData, 3000)
+    return () => clearInterval(interval)
   }, [])
 
   const handleAction = async (actionFn, name) => {
@@ -251,6 +270,37 @@ function Dashboard() {
     }
   }
 
+  const handleStop = async () => {
+    setActionLoading(true)
+    setActionStatus('Stopping agent task...')
+    try {
+      const res = await API.stopAgent()
+      setActionStatus(`✓ ${res.message || 'Agent stopped'}`)
+      await refreshData()
+      setTimeout(() => setActionStatus(''), 7000)
+    } catch (err) {
+      setActionStatus(`✗ ${err.message || 'Failed to stop agent'}`)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleResetQueue = async () => {
+    if (!window.confirm('Clear all jobs in the queue and reset the search?')) return
+    setActionLoading(true)
+    setActionStatus('Resetting queue...')
+    try {
+      const res = await API.resetQueue()
+      setActionStatus(`✓ ${res.message || 'Queue reset'}`)
+      await refreshData()
+      setTimeout(() => setActionStatus(''), 6000)
+    } catch (err) {
+      setActionStatus(`✗ ${err.message || 'Failed to reset'}`)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   if (loading) return <div className="loading shimmer" style={{ padding: '4rem' }}>Synchronizing...</div>
 
   const queueCount = summary?.jobs_in_queue || 0
@@ -263,8 +313,14 @@ function Dashboard() {
           <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem' }}>Automated LinkedIn Application Agent</p>
         </div>
         <div className="glass" style={{ padding: '0.5rem 1rem', display: 'flex', alignItems: 'center', gap: '0.75rem', fontSize: '0.85rem' }}>
-          <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--success)', boxShadow: '0 0 8px var(--success)' }}></span>
-          System Online
+          <span style={{
+            width: '8px',
+            height: '8px',
+            borderRadius: '50%',
+            background: agentRunning ? 'var(--warning)' : 'var(--success)',
+            boxShadow: agentRunning ? '0 0 8px var(--warning)' : '0 0 8px var(--success)'
+          }}></span>
+          {agentRunning ? `Task Active (${taskType || 'Browser'})` : 'System Online'}
         </div>
       </div>
 
@@ -324,7 +380,44 @@ function Dashboard() {
               </span>
             </h3>
 
-            {actionStatus && (
+            {/* RUNNING BANNER WITH STOP BUTTON */}
+            {agentRunning && (
+              <div style={{
+                marginBottom: '1.25rem',
+                padding: '0.85rem 1rem',
+                borderRadius: '8px',
+                background: 'rgba(245, 158, 11, 0.12)',
+                border: '1px solid rgba(245, 158, 11, 0.4)',
+                color: 'var(--warning)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                fontSize: '0.85rem'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: 'var(--warning)', animation: 'pulse 1.5s infinite' }}></span>
+                  <strong>{taskType === 'search' ? 'Scanning & Checking Jobs...' : 'Submitting Applications...'}</strong>
+                </div>
+                <button
+                  onClick={handleStop}
+                  disabled={actionLoading}
+                  style={{
+                    background: '#ef4444',
+                    color: '#fff',
+                    border: 'none',
+                    padding: '0.35rem 0.75rem',
+                    borderRadius: '6px',
+                    fontWeight: '700',
+                    fontSize: '0.8rem',
+                    cursor: 'pointer'
+                  }}
+                >
+                  ⏹ Stop Task
+                </button>
+              </div>
+            )}
+
+            {actionStatus && !agentRunning && (
               <div style={{
                 marginBottom: '1.25rem',
                 fontSize: '0.85rem',
@@ -346,7 +439,7 @@ function Dashboard() {
               <button
                 className="btn btn-primary"
                 onClick={() => handleAction(API.startApplications, 'Start Applications')}
-                disabled={actionLoading}
+                disabled={actionLoading || agentRunning || queueCount === 0}
                 style={{
                   width: '100%',
                   height: '3.75rem',
@@ -356,22 +449,23 @@ function Dashboard() {
                   alignItems: 'center',
                   justifyContent: 'center',
                   gap: '0.75rem',
-                  background: 'linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%)',
-                  boxShadow: '0 4px 20px rgba(6, 182, 212, 0.35)',
-                  cursor: actionLoading ? 'not-allowed' : 'pointer'
+                  background: queueCount > 0 && !agentRunning ? 'linear-gradient(135deg, #06b6d4 0%, #3b82f6 100%)' : 'rgba(255, 255, 255, 0.1)',
+                  boxShadow: queueCount > 0 && !agentRunning ? '0 4px 20px rgba(6, 182, 212, 0.35)' : 'none',
+                  cursor: (actionLoading || agentRunning || queueCount === 0) ? 'not-allowed' : 'pointer',
+                  opacity: (queueCount === 0 || agentRunning) ? 0.6 : 1
                 }}
               >
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                   <polygon points="5 3 19 12 5 21 5 3"></polygon>
                 </svg>
-                {actionLoading && actionStatus.includes('Start Applications') ? 'Submitting Applications...' : 'Start Applications'}
+                {actionLoading && actionStatus.includes('Start Applications') ? 'Submitting Applications...' : `Start Applications (${queueCount})`}
               </button>
 
               {/* SEARCH & QUEUE JOBS BUTTON */}
               <button
                 className="btn btn-secondary"
                 onClick={() => handleAction(API.triggerJobSearch, 'Job Search')}
-                disabled={actionLoading}
+                disabled={actionLoading || agentRunning}
                 style={{
                   width: '100%',
                   height: '3.5rem',
@@ -383,21 +477,62 @@ function Dashboard() {
                   gap: '0.6rem',
                   background: 'rgba(99, 102, 241, 0.12)',
                   color: 'var(--text-main)',
-                  border: '1px solid rgba(99, 102, 241, 0.3)'
+                  border: '1px solid rgba(99, 102, 241, 0.3)',
+                  cursor: (actionLoading || agentRunning) ? 'not-allowed' : 'pointer'
                 }}
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <circle cx="11" cy="11" r="8"></circle>
                   <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
                 </svg>
-                {actionLoading && actionStatus.includes('Job Search') ? 'Scanning LinkedIn...' : 'Search & Queue Jobs'}
+                {agentRunning && taskType === 'search' ? 'Scanning LinkedIn...' : 'Search & Queue Jobs'}
               </button>
+
+              {/* ACTION ROW: STOP & RESET */}
+              <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.5rem' }}>
+                {agentRunning && (
+                  <button
+                    onClick={handleStop}
+                    disabled={actionLoading}
+                    style={{
+                      flex: 1,
+                      padding: '0.75rem',
+                      background: 'rgba(239, 68, 68, 0.15)',
+                      color: 'var(--danger)',
+                      border: '1px solid var(--danger)',
+                      borderRadius: '8px',
+                      fontWeight: '600',
+                      cursor: 'pointer',
+                      fontSize: '0.85rem'
+                    }}
+                  >
+                    ⏹ Stop Current Search
+                  </button>
+                )}
+                <button
+                  onClick={handleResetQueue}
+                  disabled={actionLoading || agentRunning || queueCount === 0}
+                  style={{
+                    flex: 1,
+                    padding: '0.75rem',
+                    background: 'rgba(255, 255, 255, 0.05)',
+                    color: 'var(--text-muted)',
+                    border: '1px solid var(--card-border)',
+                    borderRadius: '8px',
+                    fontWeight: '500',
+                    cursor: (actionLoading || agentRunning || queueCount === 0) ? 'not-allowed' : 'pointer',
+                    fontSize: '0.85rem'
+                  }}
+                >
+                  🔄 Reset Search / Clear Queue
+                </button>
+              </div>
             </div>
 
-            {queueCount === 0 && (
+            {queueCount === 0 && !agentRunning && (
               <div style={{ marginTop: '1.25rem', padding: '0.85rem', background: 'rgba(255, 255, 255, 0.03)', borderRadius: '8px', fontSize: '0.8rem', color: 'var(--text-muted)', lineHeight: '1.4' }}>
-                💡 <strong>Step 1:</strong> Click <strong>"Search & Queue Jobs"</strong> to discover and score matching openings on LinkedIn.<br/>
-                💡 <strong>Step 2:</strong> Click <strong>"Start Applications"</strong> to auto-apply with your updated resume!
+                💡 <strong>Step 1:</strong> Click <strong>"Search & Queue Jobs"</strong> to discover matching jobs from LinkedIn.<br/>
+                💡 <strong>Step 2:</strong> Click <strong>"Start Applications"</strong> to begin auto-applying!
               </div>
             )}
           </div>
@@ -428,17 +563,48 @@ function Dashboard() {
 // Configuration Page
 function ConfigurationPage() {
   const [config, setConfig] = useState(null)
+  const [keywordsStr, setKeywordsStr] = useState('')
+  const [locationsStr, setLocationsStr] = useState('')
+  const [nameStr, setNameStr] = useState('')
+  const [emailStr, setEmailStr] = useState('')
+  const [phoneStr, setPhoneStr] = useState('')
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
 
   useEffect(() => {
-    API.getConfig().then(setConfig).catch(console.error)
+    API.getConfig().then(cfg => {
+      setConfig(cfg)
+      setKeywordsStr((cfg.search?.keywords || []).join(', '))
+      setLocationsStr((cfg.search?.locations || []).join(', '))
+      setNameStr(cfg.personal_info?.name || '')
+      setEmailStr(cfg.personal_info?.email || '')
+      setPhoneStr(cfg.personal_info?.phone || '')
+    }).catch(console.error)
   }, [])
 
   const handleSave = async () => {
     setSaving(true)
     try {
-      await API.updateConfig(config)
+      const parsedKeywords = keywordsStr.split(',').map(k => k.trim()).filter(Boolean)
+      const parsedLocations = locationsStr.split(',').map(l => l.trim()).filter(Boolean)
+
+      const updatedConfig = {
+        ...config,
+        personal_info: {
+          ...config.personal_info,
+          name: nameStr,
+          email: emailStr,
+          phone: phoneStr
+        },
+        search: {
+          ...config.search,
+          keywords: parsedKeywords,
+          locations: parsedLocations
+        }
+      }
+
+      await API.updateConfig(updatedConfig)
+      setConfig(updatedConfig)
       setMessage('✓ Saved successfully')
       setTimeout(() => setMessage(''), 3000)
     } catch (err) {
@@ -453,7 +619,12 @@ function ConfigurationPage() {
   return (
     <div className="page glass">
       <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '2rem' }}>
-        <h1>Settings</h1>
+        <div>
+          <h1>Settings</h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '0.25rem' }}>
+            Configure your target roles, locations, and personal information
+          </p>
+        </div>
         <button onClick={handleSave} disabled={saving} className="btn btn-primary">{saving ? 'Saving...' : 'Save Changes'}</button>
       </div>
       {message && <div style={{ color: message.startsWith('✓') ? 'var(--success)' : 'var(--danger)', marginBottom: '1rem' }}>{message}</div>}
@@ -461,9 +632,18 @@ function ConfigurationPage() {
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', gap: '2rem' }}>
         <div className="config-section">
           <h3>Personal Profile</h3>
-          <div className="form-group"><label>Full Name</label><input type="text" value={config.personal_info?.name || ''} onChange={(e) => setConfig({ ...config, personal_info: { ...config.personal_info, name: e.target.value } })} /></div>
-          <div className="form-group"><label>Email</label><input type="email" value={config.personal_info?.email || ''} onChange={(e) => setConfig({ ...config, personal_info: { ...config.personal_info, email: e.target.value } })} /></div>
-          <div className="form-group"><label>Phone</label><input type="text" value={config.personal_info?.phone || ''} onChange={(e) => setConfig({ ...config, personal_info: { ...config.personal_info, phone: e.target.value } })} /></div>
+          <div className="form-group">
+            <label>Full Name</label>
+            <input type="text" value={nameStr} onChange={(e) => setNameStr(e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Email</label>
+            <input type="email" value={emailStr} onChange={(e) => setEmailStr(e.target.value)} />
+          </div>
+          <div className="form-group">
+            <label>Phone</label>
+            <input type="text" value={phoneStr} onChange={(e) => setPhoneStr(e.target.value)} />
+          </div>
           <div className="form-group">
             <label>Resume (PDF)</label>
             <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
@@ -477,10 +657,27 @@ function ConfigurationPage() {
             </div>
           </div>
         </div>
+
         <div className="config-section">
           <h3>Target Specs</h3>
-          <div className="form-group"><label>Job Keywords</label><input type="text" value={(config.search?.keywords || []).join(', ')} onChange={(e) => setConfig({ ...config, search: { ...config.search, keywords: e.target.value.split(',').map(k => k.trim()) } })} /></div>
-          <div className="form-group"><label>Preferred Locations</label><input type="text" value={(config.search?.locations || []).join(', ')} onChange={(e) => setConfig({ ...config, search: { ...config.search, locations: e.target.value.split(',').map(l => l.trim()) } })} /></div>
+          <div className="form-group">
+            <label>Job Keywords (comma-separated, full spaces allowed)</label>
+            <input
+              type="text"
+              placeholder="e.g. Account Manager, Inside Sales, Customer Success"
+              value={keywordsStr}
+              onChange={(e) => setKeywordsStr(e.target.value)}
+            />
+          </div>
+          <div className="form-group">
+            <label>Preferred Locations (comma-separated)</label>
+            <input
+              type="text"
+              placeholder="e.g. Portland, OR, Remote"
+              value={locationsStr}
+              onChange={(e) => setLocationsStr(e.target.value)}
+            />
+          </div>
         </div>
       </div>
     </div>
@@ -493,17 +690,35 @@ function JobQueuePage() {
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState(false)
   const [actionStatus, setActionStatus] = useState('')
+  const [agentRunning, setAgentRunning] = useState(false)
 
-  const loadQueue = () => {
+  const loadQueue = async () => {
     setLoading(true)
-    API.getJobQueue()
-      .then(d => setJobs(d.jobs || []))
-      .catch(console.error)
-      .finally(() => setLoading(false))
+    try {
+      const [queueData, statusData] = await Promise.all([
+        API.getJobQueue(),
+        API.getAgentStatus()
+      ])
+      setJobs(queueData.jobs || [])
+      setAgentRunning(statusData?.is_running || false)
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoading(false)
+    }
   }
 
   useEffect(() => {
     loadQueue()
+    const interval = setInterval(async () => {
+      try {
+        const queueData = await API.getJobQueue()
+        setJobs(queueData.jobs || [])
+        const statusData = await API.getAgentStatus()
+        setAgentRunning(statusData?.is_running || false)
+      } catch (e) {}
+    }, 3000)
+    return () => clearInterval(interval)
   }, [])
 
   const handleStartApps = async () => {
@@ -512,10 +727,39 @@ function JobQueuePage() {
     try {
       const res = await API.startApplications()
       setActionStatus(`✓ ${res.message || 'Applications started in background'}`)
-      loadQueue()
+      await loadQueue()
       setTimeout(() => setActionStatus(''), 7000)
     } catch (err) {
       setActionStatus(`✗ ${err.message || 'Failed to start applications'}`)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleStop = async () => {
+    setActionLoading(true)
+    try {
+      const res = await API.stopAgent()
+      setActionStatus(`✓ ${res.message || 'Agent stopped'}`)
+      await loadQueue()
+      setTimeout(() => setActionStatus(''), 6000)
+    } catch (err) {
+      setActionStatus(`✗ ${err.message || 'Failed to stop'}`)
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  const handleReset = async () => {
+    if (!window.confirm('Clear all jobs in the queue?')) return
+    setActionLoading(true)
+    try {
+      const res = await API.resetQueue()
+      setActionStatus(`✓ ${res.message || 'Queue reset'}`)
+      await loadQueue()
+      setTimeout(() => setActionStatus(''), 6000)
+    } catch (err) {
+      setActionStatus(`✗ ${err.message || 'Failed to reset'}`)
     } finally {
       setActionLoading(false)
     }
@@ -532,24 +776,61 @@ function JobQueuePage() {
             Opportunities ready for automated submission
           </p>
         </div>
-        <button
-          className="btn btn-primary"
-          onClick={handleStartApps}
-          disabled={actionLoading || queuedCount === 0}
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: '0.6rem',
-            padding: '0.75rem 1.5rem',
-            fontWeight: '600',
-            fontSize: '0.9rem'
-          }}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
-            <polygon points="5 3 19 12 5 21 5 3"></polygon>
-          </svg>
-          {actionLoading ? 'Starting...' : `Start Applications (${queuedCount} queued)`}
-        </button>
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          {agentRunning && (
+            <button
+              onClick={handleStop}
+              disabled={actionLoading}
+              style={{
+                background: 'rgba(239, 68, 68, 0.2)',
+                color: 'var(--danger)',
+                border: '1px solid var(--danger)',
+                padding: '0.75rem 1.25rem',
+                borderRadius: '8px',
+                fontWeight: '600',
+                fontSize: '0.85rem',
+                cursor: 'pointer'
+              }}
+            >
+              ⏹ Stop Task
+            </button>
+          )}
+          <button
+            onClick={handleReset}
+            disabled={actionLoading || agentRunning || jobs.length === 0}
+            style={{
+              background: 'rgba(255, 255, 255, 0.05)',
+              color: 'var(--text-muted)',
+              border: '1px solid var(--card-border)',
+              padding: '0.75rem 1.25rem',
+              borderRadius: '8px',
+              fontWeight: '500',
+              fontSize: '0.85rem',
+              cursor: (actionLoading || agentRunning || jobs.length === 0) ? 'not-allowed' : 'pointer'
+            }}
+          >
+            🔄 Reset Queue
+          </button>
+          <button
+            className="btn btn-primary"
+            onClick={handleStartApps}
+            disabled={actionLoading || agentRunning || queuedCount === 0}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '0.6rem',
+              padding: '0.75rem 1.5rem',
+              fontWeight: '600',
+              fontSize: '0.9rem',
+              cursor: (actionLoading || agentRunning || queuedCount === 0) ? 'not-allowed' : 'pointer'
+            }}
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+              <polygon points="5 3 19 12 5 21 5 3"></polygon>
+            </svg>
+            {actionLoading ? 'Starting...' : `Start Applications (${queuedCount})`}
+          </button>
+        </div>
       </div>
 
       {actionStatus && (
