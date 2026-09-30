@@ -387,26 +387,40 @@ class ApplicationExecutor:
         if not await file_inputs.count():
             return True  # not a resume step
 
-        # Already a resume chosen (LinkedIn remembers your last upload)
+        # Already a resume chosen (LinkedIn remembers your pre-uploaded resume)
         chosen = modal.locator(
-            'input[type="radio"]:checked, [aria-label*="Selected" i][class*="document"], '
-            '[class*="jobs-document-upload-redesign-card__container--selected"]'
+            'input[type="radio"]:checked, [aria-checked="true"], '
+            '[aria-label*="Selected" i][class*="document"], '
+            '[class*="jobs-document-upload-redesign-card__container--selected"], '
+            '[class*="jobs-document-upload-redesign-card"][class*="selected"], '
+            'div[class*="resume-card--selected"]'
         )
         if await chosen.count():
+            logger.info("  Using LinkedIn pre-uploaded/saved resume.")
             return True
 
-        # A previous resume card exists but isn't selected: pick the first one
-        first_radio = modal.locator('input[type="radio"]').first
+        # A previous resume card exists on LinkedIn: select the first one
+        first_radio = modal.locator('input[type="radio"], [role="radio"], [class*="jobs-document-upload-redesign-card"]').first
         if await first_radio.count():
             try:
-                await first_radio.check(force=True)
+                await first_radio.click(force=True)
+                await self.page.wait_for_timeout(1000)
+                logger.info("  Selected LinkedIn pre-loaded resume card.")
                 return True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"  Could not click resume card: {e}")
 
-        if not self.resume_path or not Path(self.resume_path).exists():
-            logger.error(f"  Resume file not found: {self.resume_path}")
-            return False
+        # Fallback to local resume path if exists
+        fallback_path = self.resume_path
+        if not fallback_path or not Path(fallback_path).exists():
+            for cand in [Path("data/resume.pdf"), Path("uploads/urielpro78@gmail.com/resume.pdf"), Path("backend/uploads/urielpro78@gmail.com/resume.pdf")]:
+                if cand.exists():
+                    fallback_path = str(cand.absolute())
+                    break
+
+        if not fallback_path or not Path(fallback_path).exists():
+            logger.info("  No local resume file provided; proceeding with LinkedIn profile defaults.")
+            return True
         try:
             await file_inputs.first.set_input_files(str(Path(self.resume_path).absolute()))
             await self.page.wait_for_timeout(3000)

@@ -428,10 +428,20 @@ async def trigger_job_search(
     if not config:
         raise HTTPException(status_code=400, detail="Search configuration not found. Please update settings first.")
 
-    # Find resume path
+    # Find resume path (optional since LinkedIn retains uploaded resume)
     resume_path = config["personal_info"].get("resume_path")
     if not resume_path or not os.path.exists(resume_path):
-        raise HTTPException(status_code=400, detail="Resume not found. Please upload a PDF in Settings.")
+        for cand in [Path("data/resume.pdf"), Path("uploads") / user_email / "resume.pdf", Path("backend/uploads") / user_email / "resume.pdf"]:
+            if cand.exists():
+                resume_path = str(cand.absolute())
+                config["personal_info"]["resume_path"] = resume_path
+                break
+    if not resume_path or not os.path.exists(resume_path):
+        for cand in [Path("data/resume.pdf"), Path("uploads") / user_email / "resume.pdf", Path("backend/uploads") / user_email / "resume.pdf"]:
+            if cand.exists():
+                resume_path = str(cand.absolute())
+                config["personal_info"]["resume_path"] = resume_path
+                break
 
     if browser_lock.locked() or (active_browser_task and not active_browser_task.done()):
         task_label = active_task_type or "task"
