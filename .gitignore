@@ -1,0 +1,68 @@
+﻿# ===== Python =====
+__pycache__/
+*.py[cod]
+*.class
+.venv/
+.venv_new/
+venv/
+ENV/
+env/
+test_venv/
+.env
+
+# ===== Node.js =====
+node_modules/
+dist/
+dist-ssr
+*.local
+frontend/.vite/
+web/frontend/node_modules/
+
+# ===== IDE =====
+.vscode/
+.idea/
+
+# ===== Data (resume, jobs, screenshots, browser context) =====
+resume.pdf
+data/
+uploads/
+backend/data/*.json
+!backend/data/.gitkeep
+backend/resume.pdf
+
+# ===== Logs =====
+*.log
+run.log
+
+# ===== Config with personal info =====
+config.local.yaml
+
+# ===== Browser profiles / sessions / cookies =====
+browser_context/
+user-data/
+session/
+cookies/
+
+# ===== Debug / Temp output =====
+debug_export/
+temp_migration/
+debug_out.txt
+debug_resume.py
+crash_report.txt
+full_log.txt
+full_log_guard.txt
+log.txt
+log_execution.txt
+log_utf8.txt
+log_utf8_real.txt
+results.txt
+file_list.txt
+file_paths.txt
+verification_error.log
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# Resume files
+*.pdf

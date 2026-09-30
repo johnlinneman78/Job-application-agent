@@ -1,0 +1,132 @@
+﻿# Job Application Agent Configuration - Enhanced Version
+
+# Personal Information (for application forms)
+personal_info:
+  name: "Your Name"
+  address: "123 Main St"
+  city: "Your City"
+  state: "Your State"
+  zip_code: "00000"
+  years_of_experience: 5
+  portfolio_url: "https://yourportfolio.com"
+  linkedin_url: "https://www.linkedin.com/in/yourprofile"
+
+# Job Search Preferences
+search:
+  keywords:
+    - "customer service"
+    - "client service"
+    - "customer success"
+    - "sdr"
+    - "bdr"
+    - "account manager"
+    - "inside sales rep"
+  
+  locations:
+    - "United States"
+  
+  seniority:
+    - "Entry Level"
+    - "Mid Level"
+  
+  platforms:
+    - "linkedin"
+    - "indeed"
+  
+  max_applications: 10
+  posted_within_days: 14
+  only_english_jobs: true
+
+# Application Settings
+application:
+  # Only apply to jobs requiring resume upload only
+  resume_only: true
+  
+  # Skip jobs with any of these requirements
+  skip_if_has:
+    - "assessments"
+    - "external_ats"
+  
+  # Human-like pacing between applications (seconds)
+  # PRODUCTION VALUES - use debug mode for testing
+  min_delay: 120  # 2 minutes
+  max_delay: 300  # 5 minutes
+
+# Debug Settings (for development/testing only)
+debug:
+  enabled: false  # Set to true for rapid testing
+  min_delay: 1    # 1 second (fast iteration)
+  max_delay: 2    # 2 seconds
+  save_artifacts: true
+  verbose_logging: true
+  # When enabled, reduces delays and enables extra logging
+
+# Guard System Settings
+guards:
+  # Relaxed mode - allow Easy Apply with 1-2 simple questions
+  strict_mode: false
+  
+  # Maximum number of screening questions allowed
+  max_simple_questions: 2
+  
+  # Auto-answer simple screening questions
+  auto_answer_screening: true
+  
+  # Enhanced button detection (NEW)
+  button_detection:
+    # Selector priority order (tried in sequence)
+    selectors:
+      - "button#jobs-apply-button"  # Most stable
+      - 'button[data-control-name*="apply"]'
+      - 'button[aria-label*="Easy Apply"]'
+      - 'button[aria-label*="Apply"]'
+      - 'button.jobs-apply-button'  # Fallback
+    
+    # Retry configuration
+    max_attempts: 2
+    retry_delay_ms: 1200
+    settle_delay_ms: 500
+  
+  # Default answers for common screening questions
+  screening_answers:
+    work_authorization: "Yes"
+    require_sponsorship: "No"
+    remote_preference: "Yes"
+    willing_to_relocate: "No"
+    start_date: "Immediately"
+    expected_salary: "CHANGE_ME"
+    base_salary: "CHANGE_ME"
+    gender: "Decline To Self Identify"
+    disability: "No"
+    veteran: "No"
+    sales_experience: "5"
+    years_experience: "5"
+  
+  # External ATS platforms to skip
+  external_ats:
+    - "workday"
+    - "greenhouse"
+    - "lever"
+    - "icims"
+    - "taleo"
+    - "successfactors"
+  
+  # Assessment platforms to skip
+  assessment_platforms:
+    - "hackerrank"
+    - "codility"
+    - "codingame"
+    - "testgorilla"
+
+# Email Notifications (requires permission)
+email:
+  enabled: true
+  smtp_server: "smtp.gmail.com"
+  smtp_port: 587
+
+# Logging
+logging:
+  level: "INFO"  # Set to "DEBUG" for verbose output
+  save_screenshots: true
+  detailed_logs: true
+  save_button_inventory: true  # NEW: Log visible buttons on failure
