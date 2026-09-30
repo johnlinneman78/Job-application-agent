@@ -456,6 +456,12 @@ class GuardedJobScraper(JobScraper):
                     job.guard_reason = guard_result.reason
                     if guard_result.is_safe:
                         job.has_easy_apply = True
+                        try:
+                            desc_el = page.locator('#job-details, .jobs-description__content').first
+                            if await desc_el.count():
+                                job.description = (await desc_el.inner_text()).strip()
+                        except Exception as e:
+                            logger.debug(f"Could not fetch job description: {e}")
                         safe_jobs.append(job)
                         logger.info(f"SAFE: {job.title} at {job.company}")
                         if on_job_found:

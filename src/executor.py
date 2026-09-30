@@ -25,6 +25,8 @@ from src.application_guard import ApplicationGuard, EASY_APPLY_SELECTORS, DENIED
 logger = logging.getLogger(__name__)
 
 MODAL_SELECTOR = 'dialog, [role="dialog"], .jobs-easy-apply-modal, .artdeco-modal'
+MODAL_PARTS = [s.strip() for s in MODAL_SELECTOR.split(",")]
+def in_modal(sel): return ", ".join(f"{m} {sel}" for m in MODAL_PARTS)
 
 # Fields LinkedIn pre-fills from the profile on the "Contact info" step.
 # These are NOT screening questions.
@@ -85,14 +87,26 @@ class ApplicationExecutor:
     # ------------------------------------------------------------------ login
 
     async def is_logged_in(self, page: Page) -> bool:
-        """True if the LinkedIn global nav (only shown when signed in) is present."""
+        """
+        Logged in = (#global-nav OR .global-nav__me OR img.global-nav__me-photo is visible)
+        AND no visible 'a[href*="/login"]' or "Sign in" button AND url has no login/checkpoint/authwall.
+        """
         try:
-            if "login" in page.url or "checkpoint" in page.url or "authwall" in page.url:
+            url = page.url.lower()
+            if any(k in url for k in ["login", "checkpoint", "authwall"]):
                 return False
-            nav = page.locator("header nav, nav, #global-nav, .global-nav__me, .global-nav__me-photo, button[aria-label*='Me'], a[href*='/feed']").first
-            if await nav.count() > 0 and await nav.is_visible():
-                return True
-            return "feed" in page.url
+
+            sign_in = page.locator('a[href*="/login"], button:has-text("Sign in"), a:has-text("Sign in")')
+            for i in range(await sign_in.count()):
+                if await sign_in.nth(i).is_visible():
+                    return False
+
+            nav = page.locator('#global-nav, .global-nav__me, img.global-nav__me-photo, [data-testid="primary-nav"]')
+            for i in range(await nav.count()):
+                if await nav.nth(i).is_visible():
+                    return True
+
+            return False
         except Exception:
             return False
 
@@ -412,17 +426,18 @@ class ApplicationExecutor:
 
         # Fallback to local resume path if exists
         fallback_path = self.resume_path
-        if not fallback_path or not Path(fallback_path).exists():
-            for cand in [Path("data/resume.pdf"), Path("uploads/urielpro78@gmail.com/resume.pdf"), Path("backend/uploads/urielpro78@gmail.com/resume.pdf")]:
-                if cand.exists():
-                    fallback_path = str(cand.absolute())
-                    break
+        if not fallback_path or not Path(fallback_path).is_file():
+            cand = Path("data/resume.pdf")
+            if cand.is_file():
+                fallback_path = str(cand.absolute())
+            else:
+                fallback_path = None
 
-        if not fallback_path or not Path(fallback_path).exists():
+        if not fallback_path or not Path(fallback_path).is_file():
             logger.info("  No local resume file provided; proceeding with LinkedIn profile defaults.")
             return True
         try:
-            await file_inputs.first.set_input_files(str(Path(self.resume_path).absolute()))
+            await file_inputs.first.set_input_files(str(Path(fallback_path).absolute()))
             await self.page.wait_for_timeout(3000)
             logger.info("  Resume uploaded")
             return True
@@ -522,14 +537,17 @@ class ApplicationExecutor:
             if discard:
                 discard_btn = self.page.locator(
                     'button[data-control-name="discard_application_confirm_btn"], '
-                    f'{MODAL_SELECTOR} button:has-text("Discard")'
+                    + in_modal('button:has-text("Discard")')
                 ).first
                 if await discard_btn.count() and await discard_btn.is_visible():
                     await discard_btn.click(force=True)
                     await self.page.wait_for_timeout(1000)
                     continue
             close = self.page.locator(
-                f'{MODAL_SELECTOR} button:has-text("Done"), {MODAL_SELECTOR} button[aria-label*="Dismiss" i], .artdeco-modal__dismiss'
+                in_modal('button:has-text("Done")')
+                + ", "
+                + in_modal('button[aria-label*="Dismiss" i]')
+                + ", .artdeco-modal__dismiss"
             ).first
             if await close.count() and await close.is_visible():
                 await close.click(force=True)

@@ -53,7 +53,7 @@ class ResumeAnalyzer:
             for p in [Path(fname), base_dir / fname]:
                 if p.exists():
                     try:
-                        with open(p, "r", encoding="utf-8") as f:
+                        with open(p, "r", encoding="utf-8-sig") as f:
                             data = yaml.safe_load(f)
                             if data:
                                 return data
@@ -123,7 +123,7 @@ class ResumeAnalyzer:
             return match.group(0)
 
         cfg = self._load_config()
-        return cfg.get("personal_info", {}).get("email", "urielpro78@gmail.com")
+        return cfg.get("personal_info", {}).get("email", "")
 
     def _extract_phone(self, text: str) -> str:
         """Extract phone number with config fallback."""
@@ -137,14 +137,14 @@ class ResumeAnalyzer:
         if phone:
             return str(phone)
 
-        return "503-679-7248"
+        return ""
 
     def _extract_name(self, text: str) -> str:
         """Extract candidate name from header or config."""
         cfg = self._load_config()
         cfg_name = cfg.get("personal_info", {}).get("name")
 
-        # Check for uppercase name at top of resume (e.g. 'JOHN LINNEMANPortland')
+        # Check for uppercase name at top of resume (e.g. 'JOHN DOE Portland')
         first_chunk = text[:300]
         name_match = re.search(r'([A-Z]{2,}\s+[A-Z]{2,}(?:\s+[A-Z]{2,})?)(?=[A-Z][a-z]|\b|\s*\|)', first_chunk)
         if name_match:
@@ -164,7 +164,7 @@ class ResumeAnalyzer:
             if cand and 2 <= len(cand.split()) <= 4 and not any(c.isdigit() for c in cand):
                 return cand.title()
 
-        return cfg_name if cfg_name else "John Linneman"
+        return cfg_name if cfg_name else ""
 
     def _extract_technical_skills(self, text: str) -> List[str]:
         """Extract skills, honoring the explicit CORE SKILLS section."""

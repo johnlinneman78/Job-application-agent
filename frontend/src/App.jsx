@@ -367,7 +367,7 @@ function Dashboard() {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '1rem', marginBottom: '1rem' }}>
               <div>
                 <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', textTransform: 'uppercase' }}>Candidate</div>
-                <div style={{ fontWeight: '600', color: 'var(--text-main)' }}>{userConfig?.personal_info?.name || 'John Linneman'}</div>
+                <div style={{ fontWeight: '600', color: 'var(--text-main)' }}>{userConfig?.personal_info?.name || 'Your profile'}</div>
               </div>
               <div>
                 <div style={{ color: 'var(--text-muted)', fontSize: '0.75rem', textTransform: 'uppercase' }}>Resume Status</div>

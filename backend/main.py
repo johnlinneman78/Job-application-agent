@@ -430,15 +430,9 @@ async def trigger_job_search(
 
     # Find resume path (optional since LinkedIn retains uploaded resume)
     resume_path = config["personal_info"].get("resume_path")
-    if not resume_path or not os.path.exists(resume_path):
+    if not resume_path or not Path(resume_path).is_file():
         for cand in [Path("data/resume.pdf"), Path("uploads") / user_email / "resume.pdf", Path("backend/uploads") / user_email / "resume.pdf"]:
-            if cand.exists():
-                resume_path = str(cand.absolute())
-                config["personal_info"]["resume_path"] = resume_path
-                break
-    if not resume_path or not os.path.exists(resume_path):
-        for cand in [Path("data/resume.pdf"), Path("uploads") / user_email / "resume.pdf", Path("backend/uploads") / user_email / "resume.pdf"]:
-            if cand.exists():
+            if cand.is_file():
                 resume_path = str(cand.absolute())
                 config["personal_info"]["resume_path"] = resume_path
                 break
@@ -461,8 +455,27 @@ async def trigger_job_search(
                 executor = ApplicationExecutor(config, guard)
                 scraper = GuardedJobScraper(config, guard)
 
+                # Initialize ranker if resume exists
+                ranker = None
+                if resume_path and Path(resume_path).is_file():
+                    try:
+                        from src.resume_analyzer import ResumeAnalyzer
+                        from src.job_ranker import JobRanker
+                        analyzer = ResumeAnalyzer(config)
+                        parsed_resume = analyzer.parse_resume(resume_path)
+                        ranker = JobRanker(parsed_resume)
+                        logger.info(f"Initialized JobRanker for scoring with resume: {resume_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to initialize JobRanker: {e}")
+
                 # Incremental safe job callback so jobs appear immediately in the queue
                 async def on_safe_job(job):
+                    if ranker:
+                        try:
+                            ranker.score_job(job)
+                        except Exception as e:
+                            logger.warning(f"Could not score job {job.title}: {e}")
+
                     processed = {
                         "id": job.job_id,
                         "title": job.title,
@@ -537,18 +550,18 @@ async def stop_agent(current_user: dict = Depends(get_current_user)):
     stop_requested = True
     stopped = False
 
+    if active_browser_task and not active_browser_task.done():
+        active_browser_task.cancel()
+        task_name = active_task_type or "task"
+        logger.info(f"Stop signal sent for active {task_name} by {current_user['email']}")
+        stopped = True
+
     if active_browser_context:
         try:
             await active_browser_context.close()
         except Exception:
             pass
         active_browser_context = None
-
-    if active_browser_task and not active_browser_task.done():
-        active_browser_task.cancel()
-        task_name = active_task_type or "task"
-        logger.info(f"Stop signal sent for active {task_name} by {current_user['email']}")
-        stopped = True
 
     active_browser_task = None
     active_task_type = None
@@ -590,6 +603,14 @@ async def start_applications(
         raise HTTPException(status_code=400, detail="Configuration missing.")
 
     resume_path = config["personal_info"].get("resume_path")
+    if not resume_path or not Path(resume_path).is_file():
+        for cand in [Path("data/resume.pdf"), Path("uploads") / user_email / "resume.pdf", Path("backend/uploads") / user_email / "resume.pdf"]:
+            if cand.is_file():
+                resume_path = str(cand.absolute())
+                config["personal_info"]["resume_path"] = resume_path
+                break
+        if not resume_path or not Path(resume_path).is_file():
+            resume_path = ""
 
     if browser_lock.locked() or (active_browser_task and not active_browser_task.done()):
         task_label = active_task_type or "task"
@@ -601,10 +622,7 @@ async def start_applications(
             active_browser_task = asyncio.current_task()
             active_task_type = "apply"
             try:
-                logger.info(f"Starting executor background task for {user_email}")
-                if not resume_path or not os.path.exists(resume_path):
-                    logger.error(f"Executor failed: Resume not found at {resume_path}")
-                    return
+                logger.info(f"Starting executor background task for {user_email} (resume_path='{resume_path}')")
 
                 guard = ApplicationGuard(config)
                 executor = ApplicationExecutor(config, guard)
