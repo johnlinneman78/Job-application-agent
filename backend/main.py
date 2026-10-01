@@ -461,7 +461,7 @@ async def trigger_job_search(
                     try:
                         from src.resume_analyzer import ResumeAnalyzer
                         from src.job_ranker import JobRanker
-                        analyzer = ResumeAnalyzer(config)
+                        analyzer = ResumeAnalyzer()
                         parsed_resume = analyzer.parse_resume(resume_path)
                         ranker = JobRanker(parsed_resume)
                         logger.info(f"Initialized JobRanker for scoring with resume: {resume_path}")
