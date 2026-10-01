@@ -58,7 +58,7 @@ QUESTION_ALIASES = [   # whole words only ("hospitality" must not match "hospita
     ("customer success", r"\bcustomer success\b|\bclient success\b|\baccount onboarding\b"),
     ("account management", r"\baccount manage(ment|r)\b|\bmanaging accounts\b|\bkey accounts?\b"),
     ("b2b sales", r"\bb2b( sales)?\b|\bbusiness[- ]to[- ]business( sales)?\b|\bchannel sales\b|\bvar( sales)?\b"),
-    ("sales", r"\binside sales\b|\bsales\b|\bselling\b|\bbusiness development\b|\bsdr\b|\bbdr\b|\blead gen(eration)?\b|\bcold call(ing)?\b|\bquota\b"),
+    ("sales", r"\binside sales\b|\bsales\b|\bselling\b|\bbusiness development\b|\bbd\b|\bsdr\b|\bbdr\b|\blead gen(eration)?\b|\bcold call(ing)?\b|\bquota\b"),
     ("it support", r"\bit support\b|\btechnical support\b|\bdesktop support\b|\btechnician\b|\btroubleshoot(ing)?\b"),
     ("healthcare", r"\bhealth ?care\b|\bmedical\b|\bhospitals?\b|\bclinic(al|s)?\b"),
     ("insurance", r"\binsurance\b|\bmedicare\b|\bbenefits\b"),
@@ -142,15 +142,27 @@ def _mentions(text: str, word: str) -> bool:
     return re.search(r"(?<![a-z0-9])" + re.escape(word) + r"(?![a-z0-9])", text) is not None
 
 
+SECTION_STOP = re.compile(r"^\s*(education|certifications?|licens(e|es|ing)\b|references|projects\b|volunteer|awards|languages)", re.I)
+
+
 def parse_roles(resume_text: str) -> List[Role]:
+    """
+    Split the resume into dated roles. Handles both layouts:
+      one line:   "Zones, LLC — Healthcare IT Account Manager Aug 2019 – Jul 2021" + bullets
+      stacked:    "Account Manager" / "Zones LLC" / "Aug 2019 – Jul 2021" + bullets
+    Stops at Education / Certifications / Licensing sections (even "EDUCATIONWestern...").
+    """
     lines = [l.strip() for l in (resume_text or "").splitlines()]
-    # Work history only: stop at the education / certifications / references sections
     for i, line in enumerate(lines):
-        if re.fullmatch(r"(education|certifications?|licenses?( & certifications)?|references|projects|volunteer.*)\s*:?", line, re.I):
+        m = SECTION_STOP.match(line)
+        # a section heading is ALL CAPS ("EDUCATION", "EDUCATIONWestern...") or stands alone ("Education:"),
+        # and only counts after the work history has started (headlines can say "LICENSING IN PROGRESS")
+        seen_job = any(RANGE_RE.search(l) for l in lines[:i])
+        if m and seen_job and (line[:m.end()].strip().isupper() or len(line.split()) <= 2):
             lines = lines[:i]
             break
     today = (date.today().year, date.today().month)
-    marks = []
+    marks = []   # (line index, start, end, inline_header)
     for i, line in enumerate(lines):
         m = RANGE_RE.search(line)
         if not m:
@@ -163,14 +175,22 @@ def parse_roles(resume_text: str) -> List[Role]:
         end = min(end, today)
         if end < start:
             continue
-        marks.append((i, start, end))
+        rest = (line[:m.start()] + " " + line[m.end():]).strip(" |,-–—•\t")
+        inline = len(re.findall(r"[A-Za-z]{2,}", rest)) >= 2     # title/company on the same line as the dates
+        marks.append((i, start, end, inline))
+
+    def header_start(idx):
+        i, _, _, inline = marks[idx]
+        if inline:
+            return i
+        prev_end = marks[idx - 1][0] + 1 if idx > 0 else 0
+        return max(prev_end, i - 2)
+
     roles = []
-    for k, (i, start, end) in enumerate(marks):
-        nxt = marks[k + 1][0] if k + 1 < len(marks) else len(lines)
-        # header: the date line plus up to 2 non-empty lines just above it (title / company)
-        above = [l for l in lines[max(0, i - 2):i] if l]
-        header = " | ".join(above + [lines[i]])
-        body_end = nxt - 2 if k + 1 < len(marks) else nxt   # stop before the next role's title lines
+    for k, (i, start, end, inline) in enumerate(marks):
+        h0 = header_start(k)
+        header = " | ".join(l for l in lines[h0:i + 1] if l)
+        body_end = header_start(k + 1) if k + 1 < len(marks) else len(lines)
         body = "\n".join(lines[i + 1:max(i + 1, body_end)])
         roles.append(Role(start=start, end=end, text=(header + "\n" + body).lower(), header=header))
     return roles
@@ -201,6 +221,7 @@ the a an your any at least minimum min prior previous total overall paid direct 
 related field industry setting environment role roles position positions space sector type similar level based facing
 as for on within doing performing providing this or and is are what number please enter including include
 software platform platforms tool tools system systems application applications crm program programs suite
+currently presently possess possessed now today altogether own
 """.split())
 
 

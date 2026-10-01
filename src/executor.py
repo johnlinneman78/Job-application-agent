@@ -21,7 +21,20 @@ from typing import List, Optional, Tuple
 from playwright.async_api import Page, BrowserContext, Locator
 from src.models import Job, Application, ApplicationStatus, Platform
 from src.application_guard import ApplicationGuard, EASY_APPLY_SELECTORS, DENIED_BUTTON_WORDS
-from src.screening_answers import ScreeningAnswerer
+from src.screening_answers import ScreeningAnswerer, QUESTION_TEXT_JS
+
+# Text of the closest label-like element for an input that has no <label for>, aria-label or legend.
+NEARBY_LABEL_JS = """el => {
+  let node = el.parentElement;
+  for (let i = 0; i < 4 && node; i++, node = node.parentElement) {
+    const lab = node.querySelector('label, legend, [class*="label"], [class*="title"]');
+    if (lab && !lab.contains(el)) {
+      const t = (lab.innerText || lab.textContent || '').trim();
+      if (t) return t.split(/\\n+/)[0];
+    }
+  }
+  return '';
+}"""
 
 logger = logging.getLogger(__name__)
 
@@ -256,6 +269,7 @@ class ApplicationExecutor:
 
                 elif state == FSMState.SKIPPED:
                     app.status = ApplicationStatus.SKIPPED
+                    app.answers_given = list(self.answerer.given)  # what was answered before the skip
                     app.error_message = (terminal_reason.value if terminal_reason else "Unknown") + (f": {skip_detail}" if skip_detail else "")
                     await self._close_modal_if_open(discard=True)
                     break
@@ -360,9 +374,13 @@ class ApplicationExecutor:
             parts.append(await field.evaluate(
                 "el => { const fs = el.closest('fieldset'); const lg = fs && fs.querySelector('legend'); return lg ? lg.innerText : ''; }"
             ))
+            if not any(p.strip() for p in parts):
+                # No label/aria/legend: LinkedIn sometimes puts the question in a nearby span
+                parts.append(await field.evaluate(NEARBY_LABEL_JS))
+                parts.append(await field.get_attribute("placeholder") or "")
         except Exception:
             pass
-        return " ".join(p for p in parts if p).strip().lower()
+        return " ".join(" ".join(p.split()) for p in parts if p).strip().lower()
 
     async def _screening_reason(self, modal: Locator) -> Optional[str]:
         """
@@ -389,7 +407,8 @@ class ApplicationExecutor:
                 continue
             if await self.answerer.is_answered(modal, f, label):
                 continue
-            return f"Question field: '{(label or 'unlabeled')[:120]}'"
+            note = self.answerer.explain(label)
+            return f"Question field: '{(label or 'unlabeled')[:120]}'" + (f" ({note})" if note else "")
 
         # Radio buttons: allowed only for choosing which resume to send
         for r in await modal.locator('input[type="radio"]').all():
@@ -399,11 +418,10 @@ class ApplicationExecutor:
                 continue
             if await self.answerer.is_answered(modal, r, label):
                 continue
-            legend = await r.evaluate(
-                "el => { const fs = el.closest('fieldset'); const lg = fs && fs.querySelector('legend'); return lg ? lg.innerText : ''; }"
-            )
+            legend = await r.evaluate(QUESTION_TEXT_JS)
             question = (legend or label or "unlabeled").strip().lower()
-            return f"Multiple-choice question: '{question[:120]}'"
+            note = self.answerer.explain(question)
+            return f"Multiple-choice question: '{question[:120]}'" + (f" ({note})" if note else "")
 
         # Checkboxes: allowed only for consent / follow-company
         for c in await modal.locator('input[type="checkbox"]').all():

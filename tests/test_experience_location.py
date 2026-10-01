@@ -183,3 +183,19 @@ def test_area_matching_is_strict():
     assert area("How many years of hospitality experience?") is None
     assert tool("How many years of experience using Salesforce CRM?") == "salesforce"
     assert tool("How many years of Salesforce administration experience?") is None
+
+
+def test_one_line_role_layout():
+    """'Company — Title Mon YYYY – Mon YYYY' on one line, bullets below; EDUCATION glued to the next word."""
+    text = (Path(__file__).parent / "fixtures" / "sample_resume_oneline.txt").read_text(encoding="utf-8")
+    p = build_profile(text)
+    heads = [r.header for r in p.roles]
+    assert len(p.roles) == 7                                   # 6 jobs + independent projects, no degree
+    assert heads[0].startswith("Contoso Federal") and heads[5].startswith("Proseware Inc")
+    assert not any("State University" in h for h in heads)
+    # bullets stay with their own job (ticketing belongs to IT support, not the next job)
+    it_role = next(r for r in p.roles if "IT Support Technician" in r.header)
+    assert "ticketing" in it_role.text
+    hc_role = next(r for r in p.roles if "Healthcare IT" in r.header)
+    assert "ticketing" not in hc_role.text
+    assert p.areas["healthcare"] == 2 and p.areas["account management"] == 2

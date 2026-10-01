@@ -74,3 +74,52 @@ def outside_area(job_location: str, page_text: str, allowed_states: Set[str]) ->
     if not st or st & allowed_states:
         return None
     return f"Outside your area ({', '.join(sorted(st))}, {wtype or 'not remote'})"
+
+
+_LOC_RX = re.compile(
+    r"^(?:[A-Za-z .'\-]+,\s*[A-Z]{2}\b"                       # Portland, OR
+    r"|[A-Za-z .'\-]+(?:,\s*[A-Za-z .'\-]+)?,\s*United States"   # Beaverton, Oregon, United States
+    r"|United States"                                           # remote, US-wide
+    r"|[A-Za-z .'\-]+ Metropolitan Area"                        # Portland, Oregon Metropolitan Area
+    r"|Remote)"
+    r"(?:\s*\((?:On-?site|Hybrid|Remote)\))?$", re.I)
+
+
+def find_location(text: str) -> Optional[str]:
+    """
+    First thing that looks like a job location in a block of LinkedIn text
+    (a job card or the job page's top card). Lines are also split on the " · "
+    separators LinkedIn uses ("Portland, OR · 2 days ago · 40 applicants").
+    """
+    for line in (text or "").splitlines():
+        for seg in line.split("\u00b7"):
+            seg = " ".join(seg.split()).strip()
+            if not seg or len(seg) > 80:
+                continue
+            if _LOC_RX.match(seg):
+                if seg.lower() == "remote" or seg.lower().startswith("united states") or seg.endswith(")") \
+                        or states_in(seg) or "metropolitan" in seg.lower():
+                    return seg
+    return None
+
+
+def parse_card_text(text: str) -> dict:
+    """
+    Title / company / location from a job card's visible text, e.g.
+    "Sales Rep\nSales Rep with verification\nGrimco, Inc.\nPortland, OR (On-site)\n$55K/yr\nEasy Apply".
+    """
+    lines = [" ".join(l.split()) for l in (text or "").splitlines() if l.strip()]
+    out = {"title": None, "company": None, "location": find_location(text or "")}
+    if not lines:
+        return out
+    out["title"] = lines[0]
+    t = lines[0].lower()
+    for l in lines[1:]:
+        low = l.lower()
+        if low == t or low.startswith(t) or "verification" in low or l == out["location"]:
+            continue
+        if find_location(l):
+            break
+        out["company"] = l
+        break
+    return out

@@ -3,10 +3,11 @@ Job Scraper with Guards - Discover jobs on LinkedIn and Indeed.
 
 Phase 3: Job Discovery with Guard Integration
 """
-from typing import List, Dict
+from typing import List, Dict, Optional
 from playwright.async_api import async_playwright, Browser, Page, BrowserContext
 from src.models import Job, Platform, GuardStatus
 from src.application_guard import ApplicationGuard
+from src.locations import find_location, parse_card_text
 from datetime import datetime, timedelta
 import asyncio
 import logging
@@ -14,6 +15,15 @@ import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Job card layouts, newest first. The first selector that finds cards is used.
+CARD_SELECTORS = [
+    'li[data-occludable-job-id]',                  # logged-in search list (2024+)
+    'div.job-card-container',
+    'li.jobs-search-results__list-item',
+    'li.scaffold-layout__list-item',
+    'div.job-search-card, div.base-search-card',   # logged-out pages
+]
 
 
 class JobScraper:
@@ -193,6 +203,36 @@ class JobScraper:
                     f"{sum(1 for j in jobs if getattr(j, 'search_group', '') == 'remote')} remote)")
         return jobs
 
+    async def _job_page_location(self, page: Page) -> Optional[str]:
+        """Location from the job page's top card (old and new LinkedIn layouts, then plain text)."""
+        for sel in ['.jobs-unified-top-card__bullet', '.job-details-jobs-unified-top-card__bullet',
+                    '.job-details-jobs-unified-top-card__primary-description-container',
+                    '.job-details-jobs-unified-top-card__tertiary-description-container',
+                    '.jobs-unified-top-card__primary-description', '.topcard__flavor--bullet']:
+            try:
+                el = page.locator(sel).first
+                if await el.count():
+                    loc = find_location(await el.inner_text())
+                    if loc:
+                        return loc
+            except Exception:
+                pass
+        try:
+            top = page.locator('.job-details-jobs-unified-top-card__container--two-pane, .jobs-unified-top-card, .top-card-layout, main').first
+            text = (await top.inner_text(timeout=3000))[:1500] if await top.count() else ""
+            loc = find_location(text)
+            if loc:
+                # add the workplace tag ("On-site"/"Hybrid"/"Remote") if the top card shows one
+                from src.locations import workplace_type
+                wt = workplace_type(text[:600])
+                if wt and not workplace_type(loc):
+                    tag = {'onsite': 'On-site', 'hybrid': 'Hybrid', 'remote': 'Remote'}[wt]
+                    loc = f"{loc} ({tag})"
+                return loc
+        except Exception:
+            pass
+        return None
+
     async def _scrape_one_search(self, page: Page, search_url: str, title: str, location: str) -> List[Job]:
         """Open one LinkedIn search and return up to 25 job candidates."""
         jobs: List[Job] = []
@@ -210,9 +250,15 @@ class JobScraper:
                     pass
                 await page.wait_for_timeout(800)
 
-            # Extract job listings - support both logged-out and logged-in selectors
-            job_cards = page.locator('div.job-search-card, li.jobs-search-results__list-item, div.job-card-container')
-            count = await job_cards.count()
+            # Extract job listings. LinkedIn changes its class names often, so try the
+            # known card layouts in order and use the first one that finds cards.
+            job_cards, count = None, 0
+            for sel in CARD_SELECTORS:
+                job_cards = page.locator(sel)
+                count = await job_cards.count()
+                if count:
+                    logger.debug(f"Job cards matched: {sel}")
+                    break
             
             logger.info(f"Found {count} LinkedIn jobs for '{title}' in '{location}'")
 
@@ -222,7 +268,10 @@ class JobScraper:
                 # filled in later by the guard step from the job page itself.
                 links = await page.eval_on_selector_all(
                     'a[href*="/jobs/view/"]',
-                    "els => els.map(e => ({href: e.href, text: (e.innerText || '').trim()}))"
+                    """els => els.map(e => {
+                        const card = e.closest('li, [data-occludable-job-id], [data-job-id], .job-card-container, .base-card');
+                        return {href: e.href, text: (e.innerText || '').trim(), card: card ? (card.innerText || '').trim() : ''};
+                    })"""
                 )
                 seen_ids = set()
                 for item in links:
@@ -231,12 +280,13 @@ class JobScraper:
                     if not jid or not jid.isdigit() or jid in seen_ids:
                         continue
                     seen_ids.add(jid)
+                    parsed = parse_card_text(item.get("card") or "")
                     jobs.append(Job(
                         job_id=f"linkedin_{jid}",
                         platform=Platform.LINKEDIN,
-                        title=(item.get("text") or "Unknown").split("\n")[0][:120] or "Unknown",
-                        company="Unknown",
-                        location="Unknown",
+                        title=(item.get("text") or parsed["title"] or "Unknown").split("\n")[0][:120] or "Unknown",
+                        company=parsed["company"] or "Unknown",
+                        location=parsed["location"] or "Unknown",
                         url=f"https://www.linkedin.com/jobs/view/{jid}/",
                         guard_status=GuardStatus.UNKNOWN,
                         has_easy_apply=False,  # verified later by the guard
@@ -256,17 +306,25 @@ class JobScraper:
                     card = job_cards.nth(i)
                     
                     # Extract basic info with broader selectors
-                    job_title_el = card.locator('h3, a[data-tracking-control-name*="job"], .job-card-list__title').first
+                    job_title_el = card.locator('h3, a[data-tracking-control-name*="job"], .job-card-list__title, .job-card-list__title--link, a.job-card-container__link strong').first
                     job_title = (await job_title_el.inner_text()).strip() if await job_title_el.count() else "Unknown"
-                    
-                    company_el = card.locator('h4, a[data-tracking-control-name*="company"], .job-card-container__company-name').first
+
+                    company_el = card.locator('h4, a[data-tracking-control-name*="company"], .job-card-container__company-name, .job-card-container__primary-description, .artdeco-entity-lockup__subtitle').first
                     company = (await company_el.inner_text()).strip() if await company_el.count() else "Unknown"
-                    
-                    job_location_el = card.locator('span.job-search-card__location, .job-card-container__metadata-item').first
+
+                    job_location_el = card.locator('span.job-search-card__location, .job-card-container__metadata-item, .job-card-container__metadata-wrapper li, .artdeco-entity-lockup__caption').first
                     job_location = (await job_location_el.inner_text()).strip() if await job_location_el.count() else "Unknown"
-                    
-                    job_link_el = card.locator('a[data-tracking-control-name*="job"], .job-card-list__title, .job-card-container__link').first
-                    job_link = await job_link_el.get_attribute('href')
+
+                    # Class names missing or changed: read the card's visible text instead
+                    if "Unknown" in (job_title, company, job_location):
+                        parsed = parse_card_text(await card.inner_text())
+                        job_title = job_title if job_title != "Unknown" else (parsed["title"] or "Unknown")
+                        company = company if company != "Unknown" else (parsed["company"] or "Unknown")
+                        job_location = job_location if job_location != "Unknown" else (parsed["location"] or "Unknown")
+                    job_title = job_title.split("\n")[0]
+
+                    job_link_el = card.locator('a[href*="/jobs/view/"], a[data-tracking-control-name*="job"], .job-card-list__title, .job-card-container__link').first
+                    job_link = await job_link_el.get_attribute('href') if await job_link_el.count() else None
                     
                     if job_link and job_link.startswith('/'):
                         job_link = f"https://www.linkedin.com{job_link}"
@@ -557,12 +615,9 @@ class GuardedJobScraper(JobScraper):
                                 break
                     
                     if job.location == "Unknown":
-                        loc_selectors = ['.jobs-unified-top-card__bullet', '.job-details-jobs-unified-top-card__bullet', '.jobs-unified-top-card__workplace-type']
-                        for sel in loc_selectors:
-                            el = page.locator(sel).first
-                            if await el.count():
-                                job.location = (await el.inner_text()).strip()
-                                break
+                        job.location = await self._job_page_location(page) or "Unknown"
+                        if job.location == "Unknown":
+                            logger.info(f"  Location not found on job page: {job.url}")
                     
                     reason = self.excluded_reason(job)
                     if not reason:

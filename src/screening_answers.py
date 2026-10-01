@@ -44,6 +44,43 @@ from src import experience as exp_mod
 logger = logging.getLogger(__name__)
 
 PLACEHOLDERS = {"", "change_me", "changeme", "todo", "none", "null"}
+
+# Question text of a radio group. Same logic the executor uses for skip reasons:
+# <legend> first, then aria-labelledby, then LinkedIn's title span. LinkedIn often
+# repeats the text in a visually-hidden span, so repeated lines are dropped.
+QUESTION_TEXT_JS = r"""el => {
+  const fs = el.closest('fieldset') || el;
+  let t = '';
+  const lg = fs.querySelector('legend');
+  const shown = lg && lg.querySelector('[aria-hidden="true"]');
+  if (shown && shown.textContent.trim()) t = shown.textContent;
+  else if (lg) t = lg.innerText || lg.textContent || '';
+  if (!t.trim() && fs.getAttribute('aria-labelledby')) {
+    const ref = document.getElementById(fs.getAttribute('aria-labelledby'));
+    if (ref) t = ref.innerText || ref.textContent || '';
+  }
+  if (!t.trim()) {
+    const sp = fs.querySelector('[data-test-form-builder-radio-button-form-component__title], [class*="title"], [class*="label"]');
+    if (sp) t = sp.innerText || sp.textContent || '';
+  }
+  const seen = new Set(), out = [];
+  for (const line of t.split(/\\n+/)) {
+    const s = line.trim();
+    if (s && !seen.has(s.toLowerCase()) && s.toLowerCase() !== 'required') { seen.add(s.toLowerCase()); out.push(s); }
+  }
+  let s = out.join(' ').replace(/\s+/g, ' ').trim();
+  const half = s.slice(0, Math.floor(s.length / 2)).trim();
+  if (half && s === half + ' ' + half) s = half;          // "Q? Q?" -> "Q?"
+  return s;
+}"""
+
+# Visible text of one radio option ("Yes" / "No" / "3-5 years")
+OPTION_TEXT_JS = r"""el => {
+  let lab = el.id ? document.querySelector('label[for="' + el.id + '"]') : null;
+  if (!lab) lab = el.closest('label');
+  const t = lab ? (lab.innerText || lab.textContent || '') : '';
+  return (t.trim().split(/\\n+/)[0] || el.value || el.getAttribute('aria-label') || '').trim();
+}"""
 DECLINE_WORDS = ["decline", "prefer not", "don't wish", "do not wish", "not to answer", "choose not", "i don't want"]
 
 # (key, regex on the lower-cased question label) - order matters, first match wins
@@ -55,13 +92,13 @@ RULES: List[Tuple[str, str]] = [
     ("work_authorization", r"(legally )?(authori[sz]ed|eligible|permitted|right) to work|work authori[sz]ation"),
     ("willing_to_relocate", r"relocat"),
     ("commute_ok", r"commut"),
-    ("onsite_ok", r"(comfortable|willing|able|open)\b.{0,40}(on-?site|in[- ]office|in person|hybrid)"),
+    ("onsite_ok", r"(comfortable|willing|able|open|ok)\b.{0,60}(on-?site|on site|in[- ]office|in the office|in person|hybrid)"),
     ("remote_preference", r"(comfortable|willing|able|open|prefer)\b.{0,30}remote|work(ing)? remotely"),
     ("background_check_ok", r"background check"),
     ("drug_test_ok", r"drug (test|screen)"),
     ("drivers_license", r"driver'?s? licen[cs]e"),
     ("bachelors_degree", r"bachelor"),
-    ("high_school", r"high school|ged"),
+    ("high_school", r"high school|\bged\b"),
     ("english_proficiency", r"english"),
     ("start_date", r"start date|when can you start|available to start|notice period|how soon"),
     ("expected_salary", r"salary|compensation|pay (rate|expectation)|desired pay|expected pay|hourly rate|desired rate"),
@@ -188,6 +225,24 @@ class ScreeningAnswerer:
                 return _clean(self.answers.get(key))
         return None
 
+    def explain(self, label: str) -> str:
+        """
+        Short note for the skip reason when a question was left unanswered, so the
+        Tracker shows whether the fix is in Settings or in the bot.
+        """
+        q = (label or "").lower()
+        if not q:
+            return ""
+        if self.answer_for(q) is not None:
+            return "answer saved, but the bot could not select it"
+        if "years" in q and ("experience" in q or "years of" in q):
+            return "not an experience area the bot recognises" if not exp_mod.area_for_question(q) \
+                and not exp_mod.tool_for_question(q) else "no years found for this"
+        for key, rx in RULES:
+            if re.search(rx, q):
+                return f"no answer saved in Settings ({key})"
+        return "question not recognised"
+
     def _years_answer(self, q: str) -> Optional[str]:
         # 1) manual skill / tool entries in Settings always win
         for skill, yrs in self.skill_years.items():
@@ -211,8 +266,8 @@ class ScreeningAnswerer:
                 return str(yrs) if yrs > 0 else self._zero("years")
             return None
         # 4) generic "years of (work / professional) experience" only - not "years of Python"
-        if re.search(r"years of (total |overall |professional |relevant |work |full[- ]time )?(work )?experience\??\s*$", q) \
-                or re.search(r"how many years of (total |overall |professional |work )?experience do you have\??\s*$", q):
+        if re.search(r"years of (total |overall |professional |relevant |work |full[- ]time )?(work )?experience"
+                     r"( do you (currently |presently )?have| have you had)?( in total| total| currently)?\??\s*$", q):
             manual = _clean(self.answers.get("years_experience"))
             if manual:
                 return manual
@@ -278,30 +333,27 @@ class ScreeningAnswerer:
                 radios = fs.locator('input[type="radio"]')
                 if not await radios.count() or await fs.locator('input[type="radio"]:checked').count():
                     continue
-                legend = fs.locator("legend, span[data-test-form-builder-radio-button-form-component__title]").first
-                label = ((await legend.inner_text()) if await legend.count() else "").strip().lower()
+                label = (await fs.evaluate(QUESTION_TEXT_JS)).strip().lower()
                 ans = self.answer_for(label)
                 if ans is None:
+                    if label:
+                        logger.info(f"  No saved answer for: '{label[:90]}'")
                     continue
                 texts = []
                 for i in range(await radios.count()):
                     r = radios.nth(i)
-                    rid = await r.get_attribute("id")
-                    lab = fs.locator(f'label[for="{rid}"]').first if rid else None
-                    texts.append(((await lab.inner_text()) if lab is not None and await lab.count() else (await r.get_attribute("value") or "")).strip())
+                    texts.append((await r.evaluate(OPTION_TEXT_JS)).strip())
                 choice = self._pick_option(texts, ans)
                 if choice is None:
+                    logger.info(f"  Saved answer '{ans}' matches none of {texts} for: '{label[:70]}'")
                     continue
-                idx = texts.index(choice)
-                r = radios.nth(idx)
-                rid = await r.get_attribute("id")
-                if rid and await fs.locator(f'label[for="{rid}"]').count():
-                    await fs.locator(f'label[for="{rid}"]').first.click()
+                r = radios.nth(texts.index(choice))
+                if await self._select_radio(fs, r):
+                    answered.append(self._log(label, choice))
                 else:
-                    await r.check(force=True)
-                answered.append(self._log(label, choice))
+                    logger.warning(f"  Could not select '{choice}' for: '{label[:70]}'")
             except Exception as e:
-                logger.debug(f"radio answer failed: {e}")
+                logger.info(f"  radio answer failed: {e}")
 
         return answered
 
@@ -320,6 +372,28 @@ class ScreeningAnswerer:
             return bool((await field.input_value()).strip())
         except Exception:
             return False
+
+    @staticmethod
+    async def _select_radio(fs: Locator, r: Locator) -> bool:
+        """Select one radio and confirm it is really checked (LinkedIn hides the input behind its label)."""
+        rid = await r.get_attribute("id")
+        attempts = []
+        if rid:
+            attempts.append(lambda: fs.locator(f'label[for="{rid}"]').first.click(timeout=3000))
+        attempts.append(lambda: r.check(force=True, timeout=3000))
+        attempts.append(lambda: r.evaluate(
+            "el => { el.click(); el.dispatchEvent(new Event('change', {bubbles: true})); }"))
+        for attempt in attempts:
+            try:
+                await attempt()
+            except Exception as e:
+                logger.debug(f"radio select attempt failed: {e}")
+            try:
+                if await r.is_checked():
+                    return True
+            except Exception:
+                pass
+        return False
 
     # ------------------------------------------------------------ helpers
 
