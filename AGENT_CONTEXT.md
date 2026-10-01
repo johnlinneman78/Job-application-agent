@@ -74,3 +74,4 @@
 
 ## 6. Log
 - **2026-09-30**: Applied Tracker page bug fixes to `frontend/src/App.jsx`. Verified frontend build (`npm run build`) and Python test suite (27 tests passed). Established and updated `AGENT_CONTEXT.md` with setup guidelines, complete hard rules, and clean UTF-8 encoding.
+- **2026-09-30**: Fixed scraper location leak: when searching "Remote" (United States), locked work_types strictly to remote-only (f_WT=2) to prevent matching nationwide on-site/hybrid positions.
