@@ -309,8 +309,7 @@ class JobScraper:
         loc = (location or "").strip()
         if loc.lower() in ("remote", "anywhere", "remote (us)"):
             loc = "United States"
-            if "remote" not in work_types:
-                work_types.append("remote")
+            work_types = ["remote"]
 
         days = int(days_ago or search.get("posted_within_days") or 14)
         params = {
