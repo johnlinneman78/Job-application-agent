@@ -592,6 +592,14 @@ function ConfigurationPage() {
   const [uploadingResume, setUploadingResume] = useState(false)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
+  const [autoAnswer, setAutoAnswer] = useState(true)
+  const [workAuth, setWorkAuth] = useState('Yes')
+  const [sponsorship, setSponsorship] = useState('No')
+  const [remotePref, setRemotePref] = useState('Yes')
+  const [relocate, setRelocate] = useState('No')
+  const [expYears, setExpYears] = useState(4)
+  const [expectedSalary, setExpectedSalary] = useState('120000')
+  const [startDate, setStartDate] = useState('Immediately')
 
   useEffect(() => {
     API.getConfig().then(cfg => {
@@ -604,6 +612,14 @@ function ConfigurationPage() {
       const rPath = cfg.personal_info?.resume_path || ''
       setResumePath(rPath)
       if (rPath) setResumeFileName('resume.pdf')
+      setAutoAnswer(cfg.application?.auto_answer_screening !== false)
+      setWorkAuth(cfg.screening_answers?.work_authorization || 'Yes')
+      setSponsorship(cfg.screening_answers?.require_sponsorship || 'No')
+      setRemotePref(cfg.screening_answers?.remote_preference || 'Yes')
+      setRelocate(cfg.screening_answers?.willing_to_relocate || 'No')
+      setExpYears(cfg.screening_answers?.default_experience_years || 4)
+      setExpectedSalary(cfg.screening_answers?.expected_salary || '120000')
+      setStartDate(cfg.screening_answers?.start_date || 'Immediately')
     }).catch(console.error)
   }, [])
 
@@ -647,6 +663,19 @@ function ConfigurationPage() {
           ...config?.search,
           keywords: parsedKeywords,
           locations: parsedLocations
+        },
+        application: {
+          ...config?.application,
+          auto_answer_screening: autoAnswer
+        },
+        screening_answers: {
+          work_authorization: workAuth,
+          require_sponsorship: sponsorship,
+          remote_preference: remotePref,
+          willing_to_relocate: relocate,
+          default_experience_years: Number(expYears) || 4,
+          expected_salary: expectedSalary,
+          start_date: startDate
         }
       }
 
@@ -765,6 +794,93 @@ function ConfigurationPage() {
               value={locationsStr}
               onChange={(e) => setLocationsStr(e.target.value)}
             />
+          </div>
+        </div>
+
+        <div className="config-section" style={{ gridColumn: '1 / -1' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
+            <div>
+              <h3>⚡ Automated Screening Questions</h3>
+              <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginTop: '0.2rem' }}>
+                Pre-configure standard screening answers so the agent can safely handle Easy Apply questionnaires and submit without stalling.
+              </p>
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer', fontSize: '0.85rem', background: 'rgba(255,255,255,0.05)', padding: '0.5rem 0.8rem', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
+              <input
+                type="checkbox"
+                checked={autoAnswer}
+                onChange={(e) => setAutoAnswer(e.target.checked)}
+                style={{ width: '18px', height: '18px', cursor: 'pointer' }}
+              />
+              <span style={{ fontWeight: '600', color: autoAnswer ? 'var(--success)' : 'var(--text-muted)' }}>
+                {autoAnswer ? '✓ Auto-Answer Enabled' : 'Strict Resume-Only (Skip Questions)'}
+              </span>
+            </label>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1.25rem' }}>
+            <div className="form-group">
+              <label>US Work Authorization</label>
+              <select value={workAuth} onChange={(e) => setWorkAuth(e.target.value)}>
+                <option value="Yes">Yes (Authorized to work in US)</option>
+                <option value="No">No</option>
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label>Require Visa Sponsorship</label>
+              <select value={sponsorship} onChange={(e) => setSponsorship(e.target.value)}>
+                <option value="No">No (Will not require sponsorship)</option>
+                <option value="Yes">Yes (Require sponsorship)</option>
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label>Remote Work Preference</label>
+              <select value={remotePref} onChange={(e) => setRemotePref(e.target.value)}>
+                <option value="Yes">Yes (Comfortable working remotely)</option>
+                <option value="No">No</option>
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label>Willing to Relocate</label>
+              <select value={relocate} onChange={(e) => setRelocate(e.target.value)}>
+                <option value="No">No</option>
+                <option value="Yes">Yes</option>
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label>Default Experience (Years)</label>
+              <input
+                type="number"
+                min="0"
+                max="40"
+                value={expYears}
+                onChange={(e) => setExpYears(e.target.value)}
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Expected Annual Salary ($ USD)</label>
+              <input
+                type="text"
+                placeholder="e.g. 120000"
+                value={expectedSalary}
+                onChange={(e) => setExpectedSalary(e.target.value)}
+              />
+            </div>
+
+            <div className="form-group">
+              <label>Earliest Start Date / Notice</label>
+              <input
+                type="text"
+                placeholder="e.g. Immediately or 2 weeks"
+                value={startDate}
+                onChange={(e) => setStartDate(e.target.value)}
+              />
+            </div>
           </div>
         </div>
       </div>

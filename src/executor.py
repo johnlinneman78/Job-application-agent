@@ -185,12 +185,25 @@ class ApplicationExecutor:
 
                     reason = await self._screening_reason(modal)
                     if reason:
-                        logger.info(f"  Skip: {reason}")
-                        state = FSMState.SKIPPED
-                        terminal_reason = (TerminalReason.COVER_LETTER_REQUIRED
-                                           if "cover letter" in reason.lower()
-                                           else TerminalReason.SCREENING_QUESTIONS)
-                        continue
+                        auto_answer = self.config.get("application", {}).get("auto_answer_screening", True)
+                        if auto_answer:
+                            answered_ok, fail_reason = await self._auto_answer_step_questions(modal)
+                            if not answered_ok:
+                                logger.info(f"  Skip: {fail_reason or reason}")
+                                state = FSMState.SKIPPED
+                                terminal_reason = (TerminalReason.COVER_LETTER_REQUIRED
+                                                   if "cover letter" in (fail_reason or reason).lower()
+                                                   else TerminalReason.SCREENING_QUESTIONS)
+                                continue
+                            else:
+                                logger.info("  Screening questions successfully answered on this step.")
+                        else:
+                            logger.info(f"  Skip: {reason}")
+                            state = FSMState.SKIPPED
+                            terminal_reason = (TerminalReason.COVER_LETTER_REQUIRED
+                                               if "cover letter" in reason.lower()
+                                               else TerminalReason.SCREENING_QUESTIONS)
+                            continue
 
                     btn, btn_type = await self._find_priority_button(modal)
                     if not btn:
@@ -353,6 +366,249 @@ class ApplicationExecutor:
             pass
         return " ".join(p for p in parts if p).strip().lower()
 
+    async def _auto_answer_step_questions(self, modal: Locator) -> Tuple[bool, Optional[str]]:
+        """
+        Attempts to automatically answer standard screening questions on the current modal step:
+        - Radio buttons: Work authorization (Yes), sponsorship (No), remote/commute (Yes), experience/skills (Yes).
+        - Dropdowns: Work authorization, language/proficiency, education level, yes/no.
+        - Text/Number fields: Years of experience, expected salary, availability/start date, location/city.
+        - Checkboxes: Terms/authorization/certification agreements.
+        - Textarea: Cover letter (if required -> skip; if optional -> leave empty), essay questions (if required -> skip).
+        """
+        screening = self.config.get("screening_answers", {})
+        personal = self.config.get("personal_info", {})
+
+        # 1. Textareas (Cover letter & essays)
+        for ta in await modal.locator("textarea").all():
+            if not await ta.is_visible():
+                continue
+            label = await self._field_label(modal, ta)
+            is_required = (await ta.get_attribute("required") is not None) or ("required" in label)
+            if "cover letter" in label:
+                if is_required:
+                    return False, "Cover letter required"
+                continue
+            if is_required:
+                val = (await ta.input_value()).strip()
+                if not val:
+                    return False, f"Essay question required: '{label[:60]}'"
+
+        # 2. Radio button groups
+        radios = await modal.locator('input[type="radio"]').all()
+        handled_radio_names = set()
+        for r in radios:
+            if not await r.is_visible():
+                continue
+            label = await self._field_label(modal, r)
+            # Check if this is part of resume selection
+            in_resume_picker = await r.evaluate("el => !!el.closest('[class*=\"document\"], [class*=\"resume\"], [class*=\"jobs-resume\"]')")
+            if in_resume_picker or "resume" in label or ".pdf" in label or ".docx" in label:
+                continue
+
+            r_name = await r.get_attribute("name") or label[:30]
+            if r_name in handled_radio_names:
+                continue
+
+            # Find all radios in this group
+            r_attr = await r.get_attribute("name")
+            if r_attr:
+                group_radios = await modal.locator(f'input[type="radio"][name="{r_attr}"]').all()
+            else:
+                group_radios = [r]
+
+            # Check if any in group is already checked
+            any_checked = False
+            for gr in group_radios:
+                if await gr.is_checked():
+                    any_checked = True
+                    break
+            if any_checked:
+                handled_radio_names.add(r_name)
+                continue
+
+            # Determine best answer ("Yes" or "No")
+            target_answer = "Yes"
+            q_lower = label.lower()
+            if any(w in q_lower for w in ["sponsorship", "require visa", "visa sponsorship", "need sponsorship"]):
+                target_answer = screening.get("require_sponsorship", "No")
+            elif any(w in q_lower for w in ["authorized", "authorization", "legally authorized", "eligible to work", "right to work"]):
+                target_answer = screening.get("work_authorization", "Yes")
+            elif any(w in q_lower for w in ["relocate", "relocation"]):
+                target_answer = screening.get("willing_to_relocate", "No")
+            elif any(w in q_lower for w in ["remote", "work from home", "commute", "travel"]):
+                target_answer = screening.get("remote_preference", "Yes")
+            elif any(w in q_lower for w in ["previously employed", "worked for us", "former employee", "relatives"]):
+                target_answer = "No"
+            else:
+                target_answer = "Yes"
+
+            chosen = None
+            for gr in group_radios:
+                r_id = await gr.get_attribute("id")
+                btn_label = ""
+                if r_id:
+                    lab_el = modal.locator(f'label[for="{r_id}"]').first
+                    if await lab_el.count():
+                        btn_label = (await lab_el.inner_text()).strip()
+                if not btn_label:
+                    try:
+                        btn_label = (await gr.evaluate("el => (el.closest('label') || el.parentElement).innerText") or "").strip()
+                    except Exception:
+                        btn_label = ""
+                if not btn_label:
+                    btn_label = (await gr.get_attribute("value") or "").strip()
+
+                if target_answer.lower() in btn_label.lower():
+                    chosen = gr
+                    break
+
+            if chosen:
+                await chosen.check(force=True)
+                logger.info(f"  Auto-selected radio '{label[:50]}': {target_answer}")
+                handled_radio_names.add(r_name)
+            else:
+                is_req = await r.get_attribute("required") is not None
+                if is_req:
+                    return False, f"Could not match radio option for '{label[:50]}'"
+
+        # 3. Dropdown selects
+        selects = await modal.locator("select").all()
+        for sel in selects:
+            if not await sel.is_visible():
+                continue
+            label = await self._field_label(modal, sel)
+            current_val = (await sel.input_value() or "").strip()
+
+            opts = await sel.locator("option").all()
+            opt_data = []
+            for opt in opts:
+                val = await opt.get_attribute("value") or ""
+                txt = (await opt.inner_text()).strip()
+                if txt and not any(p in txt.lower() for p in ["select an option", "choose", "select...", "--"]):
+                    opt_data.append((val, txt))
+
+            if not opt_data:
+                continue
+
+            if current_val and any(val == current_val for val, _ in opt_data):
+                continue
+
+            q_lower = label.lower()
+            selected_val = None
+            selected_text = None
+
+            if any(w in q_lower for w in ["sponsorship", "visa"]):
+                target = screening.get("require_sponsorship", "No").lower()
+                for val, txt in opt_data:
+                    if target in txt.lower():
+                        selected_val, selected_text = val, txt
+                        break
+            elif any(w in q_lower for w in ["authorized", "authorization", "legally", "citizen"]):
+                target = screening.get("work_authorization", "Yes").lower()
+                for val, txt in opt_data:
+                    if target in txt.lower() or "citizen" in txt.lower() or "authorized" in txt.lower():
+                        selected_val, selected_text = val, txt
+                        break
+            elif any(w in q_lower for w in ["proficiency", "language", "english", "level"]):
+                for pref in ["native", "fluent", "professional", "advanced", "conversational"]:
+                    for val, txt in opt_data:
+                        if pref in txt.lower():
+                            selected_val, selected_text = val, txt
+                            break
+                    if selected_val:
+                        break
+            elif any(w in q_lower for w in ["education", "degree"]):
+                for pref in ["bachelor", "master", "associate", "degree", "high school"]:
+                    for val, txt in opt_data:
+                        if pref in txt.lower():
+                            selected_val, selected_text = val, txt
+                            break
+                    if selected_val:
+                        break
+            elif any(w in q_lower for w in ["years", "experience"]):
+                exp_yrs = str(screening.get("default_experience_years", 4))
+                for val, txt in opt_data:
+                    if exp_yrs in txt or "3" in txt or "4" in txt or "5" in txt:
+                        selected_val, selected_text = val, txt
+                        break
+            else:
+                for val, txt in opt_data:
+                    if "yes" in txt.lower():
+                        selected_val, selected_text = val, txt
+                        break
+
+            if selected_val is not None:
+                await sel.select_option(value=selected_val)
+                logger.info(f"  Auto-selected dropdown for '{label[:50]}': {selected_text}")
+            else:
+                is_req = await sel.get_attribute("required") is not None
+                if is_req:
+                    return False, f"Could not determine dropdown answer for '{label[:50]}'"
+
+        # 4. Text and Number inputs
+        inputs = await modal.locator(
+            'input[type="text"], input[type="number"], input:not([type])'
+        ).all()
+        for inp in inputs:
+            if not await inp.is_visible():
+                continue
+            label = await self._field_label(modal, inp)
+            val = (await inp.input_value() or "").strip()
+            if val:
+                continue
+
+            itype = (await inp.get_attribute("type") or "").lower()
+            if itype in ["file", "radio", "checkbox", "hidden", "submit", "button"]:
+                continue
+
+            q_lower = label.lower()
+            fill_val = None
+
+            if any(w in q_lower for w in ["years", "how many years", "experience"]):
+                fill_val = str(screening.get("default_experience_years", 4))
+            elif any(w in q_lower for w in ["salary", "compensation", "expected", "desired", "pay", "rate"]):
+                fill_val = str(screening.get("expected_salary", "120000"))
+            elif any(w in q_lower for w in ["notice", "start date", "availability", "how soon", "when can you start"]):
+                fill_val = str(screening.get("start_date", "Immediately"))
+            elif any(w in q_lower for w in ["city", "location", "address"]):
+                fill_val = personal.get("city") or "Remote"
+            elif any(w in q_lower for w in ["phone", "mobile", "telephone"]):
+                fill_val = personal.get("phone", "")
+            elif any(w in q_lower for w in ["zip", "postal"]):
+                fill_val = personal.get("zip_code", "")
+            elif any(w in q_lower for w in ["linkedin", "website", "portfolio", "url"]):
+                fill_val = personal.get("linkedin_url") or personal.get("portfolio_url") or ""
+
+            if fill_val:
+                await inp.fill(fill_val)
+                try:
+                    await inp.dispatch_event("change")
+                    await inp.dispatch_event("input")
+                except Exception:
+                    pass
+                logger.info(f"  Auto-filled input for '{label[:50]}': {fill_val}")
+            else:
+                is_req = await inp.get_attribute("required") is not None
+                if is_req:
+                    return False, f"Unrecognized required field: '{label[:50]}'"
+
+        # 5. Checkboxes
+        checkboxes = await modal.locator('input[type="checkbox"]').all()
+        for cb in checkboxes:
+            if not await cb.is_visible():
+                continue
+            label = await self._field_label(modal, cb)
+            if "follow" in label.lower():
+                continue
+            is_req = await cb.get_attribute("required") is not None or any(
+                w in label.lower() for w in ["certify", "agree", "terms", "acknowledge", "consent", "confirm", "authorized"]
+            )
+            if is_req and not await cb.is_checked():
+                await cb.check(force=True)
+                logger.info(f"  Auto-checked consent checkbox: '{label[:50]}'")
+
+        return True, None
+
     async def _screening_reason(self, modal: Locator) -> Optional[str]:
         """
         Return a reason string if this step contains a real screening question,
@@ -381,9 +637,7 @@ class ApplicationExecutor:
         # Radio buttons: allowed only for choosing which resume to send
         for r in await modal.locator('input[type="radio"]').all():
             label = await self._field_label(modal, r)
-            in_resume_picker = await r.evaluate(
-                "el => !!el.closest('[class*=\"document\"], [class*=\"resume\"], [class*=\"jobs-resume\"]')"
-            )
+            in_resume_picker = await r.evaluate("el => !!el.closest('[class*=\"document\"], [class*=\"resume\"], [class*=\"jobs-resume\"]')")
             if in_resume_picker or "resume" in label or ".pdf" in label or ".docx" in label:
                 continue
             return f"Multiple-choice question: '{label[:60] or 'unlabeled'}'"

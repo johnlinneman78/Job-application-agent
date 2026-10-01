@@ -139,6 +139,7 @@ class ScreeningAnswers(BaseModel):
     willing_to_relocate: str = "No"
     expected_salary: str = "120000"
     start_date: str = "Immediately"
+    default_experience_years: int = 4
 
 class Configuration(BaseModel):
     personal_info: PersonalInfo
@@ -361,7 +362,8 @@ async def get_config(current_user: dict = Depends(get_current_user)):
                 "remote_preference": "Yes",
                 "willing_to_relocate": "No",
                 "expected_salary": "120000",
-                "start_date": "Immediately"
+                "start_date": "Immediately",
+                "default_experience_years": 4
             }
         }
     return config
