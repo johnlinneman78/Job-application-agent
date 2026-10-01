@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react'
+import { SearchPanel, SalaryPanel, ScreeningPanel, PacingPanel, ContactPanel, validateSettings } from './components/SettingsPanels'
 import { BrowserRouter, Routes, Route, Navigate, Link, useLocation } from 'react-router-dom'
 import './App.css'
 import LiveFeed from './components/LiveFeed'
@@ -89,6 +90,27 @@ const API = {
     method: 'POST'
   }),
 
+  getTracker: () => API.request('/api/tracker'),
+  syncTracker: (opts) => API.request('/api/tracker/sync', {
+    method: 'POST',
+    body: JSON.stringify(opts || { gmail: true, linkedin: true, days: 30 })
+  }),
+  getSyncStatus: () => API.request('/api/tracker/sync/status'),
+  updateTrackerApp: (id, data) => API.request(`/api/tracker/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data)
+  }),
+  getRecruiterNote: (id) => API.request(`/api/tracker/${id}/note`, {
+    method: 'POST'
+  }),
+  assignUnmatched: (message_id, app_id) => API.request('/api/tracker/unmatched/assign', {
+    method: 'POST',
+    body: JSON.stringify({ message_id, app_id })
+  }),
+  sendDigest: () => API.request('/api/tracker/digest', {
+    method: 'POST'
+  }),
+
   getAgentStatus: () => API.request('/api/agent/status'),
 
   uploadResume: async (file) => {
@@ -157,6 +179,7 @@ function Navbar() {
         <Link to="/" className={path === '/' ? 'active' : ''}>Dashboard</Link>
         <Link to="/queue" className={path === '/queue' ? 'active' : ''}>Queue</Link>
         <Link to="/applications" className={path === '/applications' ? 'active' : ''}>History</Link>
+        <Link to="/tracker" className={path === '/tracker' ? 'active' : ''}>Tracker</Link>
         <Link to="/config" className={path === '/config' ? 'active' : ''}>Settings</Link>
       </div>
       <div className="nav-user">
@@ -582,8 +605,6 @@ function Dashboard() {
 // Configuration Page
 function ConfigurationPage() {
   const [config, setConfig] = useState(null)
-  const [keywordsStr, setKeywordsStr] = useState('')
-  const [locationsStr, setLocationsStr] = useState('')
   const [nameStr, setNameStr] = useState('')
   const [emailStr, setEmailStr] = useState('')
   const [phoneStr, setPhoneStr] = useState('')
@@ -592,34 +613,24 @@ function ConfigurationPage() {
   const [uploadingResume, setUploadingResume] = useState(false)
   const [saving, setSaving] = useState(false)
   const [message, setMessage] = useState('')
-  const [autoAnswer, setAutoAnswer] = useState(true)
-  const [workAuth, setWorkAuth] = useState('Yes')
-  const [sponsorship, setSponsorship] = useState('No')
-  const [remotePref, setRemotePref] = useState('Yes')
-  const [relocate, setRelocate] = useState('No')
-  const [expYears, setExpYears] = useState(4)
-  const [expectedSalary, setExpectedSalary] = useState('120000')
-  const [startDate, setStartDate] = useState('Immediately')
+  const [settingsTab, setSettingsTab] = useState('search')
+  const [dirty, setDirty] = useState(false)
+
+  // update one setting: update('search', 'work_types', ['remote'])
+  const update = (section, key, value) => {
+    setConfig(prev => ({ ...prev, [section]: { ...(prev?.[section] || {}), [key]: value } }))
+    setDirty(true)
+  }
 
   useEffect(() => {
     API.getConfig().then(cfg => {
       setConfig(cfg)
-      setKeywordsStr((cfg.search?.keywords || []).join(', '))
-      setLocationsStr((cfg.search?.locations || []).join(', '))
       setNameStr(cfg.personal_info?.name || '')
       setEmailStr(cfg.personal_info?.email || '')
       setPhoneStr(cfg.personal_info?.phone || '')
       const rPath = cfg.personal_info?.resume_path || ''
       setResumePath(rPath)
       if (rPath) setResumeFileName('resume.pdf')
-      setAutoAnswer(cfg.application?.auto_answer_screening !== false)
-      setWorkAuth(cfg.screening_answers?.work_authorization || 'Yes')
-      setSponsorship(cfg.screening_answers?.require_sponsorship || 'No')
-      setRemotePref(cfg.screening_answers?.remote_preference || 'Yes')
-      setRelocate(cfg.screening_answers?.willing_to_relocate || 'No')
-      setExpYears(cfg.screening_answers?.default_experience_years || 4)
-      setExpectedSalary(cfg.screening_answers?.expected_salary || '120000')
-      setStartDate(cfg.screening_answers?.start_date || 'Immediately')
     }).catch(console.error)
   }, [])
 
@@ -645,43 +656,27 @@ function ConfigurationPage() {
   }
 
   const handleSave = async () => {
+    const updatedConfig = {
+      ...config,
+      personal_info: {
+        ...config?.personal_info,
+        name: nameStr,
+        email: emailStr,
+        phone: phoneStr,
+        resume_path: resumePath || config?.personal_info?.resume_path || ''
+      }
+    }
+    const errs = validateSettings(updatedConfig)
+    if (errs.length) {
+      setMessage(`✗ ${errs.join(' ')}`)
+      return
+    }
     setSaving(true)
     try {
-      const parsedKeywords = keywordsStr.split(',').map(k => k.trim()).filter(Boolean)
-      const parsedLocations = locationsStr.split(',').map(l => l.trim()).filter(Boolean)
-
-      const updatedConfig = {
-        ...config,
-        personal_info: {
-          ...config?.personal_info,
-          name: nameStr,
-          email: emailStr,
-          phone: phoneStr,
-          resume_path: resumePath || config?.personal_info?.resume_path || ''
-        },
-        search: {
-          ...config?.search,
-          keywords: parsedKeywords,
-          locations: parsedLocations
-        },
-        application: {
-          ...config?.application,
-          auto_answer_screening: autoAnswer
-        },
-        screening_answers: {
-          work_authorization: workAuth,
-          require_sponsorship: sponsorship,
-          remote_preference: remotePref,
-          willing_to_relocate: relocate,
-          default_experience_years: Number(expYears) || 4,
-          expected_salary: expectedSalary,
-          start_date: startDate
-        }
-      }
-
       await API.updateConfig(updatedConfig)
       setConfig(updatedConfig)
-      setMessage('✓ All settings & resume saved successfully!')
+      setDirty(false)
+      setMessage('✓ All settings saved.')
       setTimeout(() => setMessage(''), 3000)
     } catch (err) {
       setMessage(`✗ Error: ${err.message}`)
@@ -701,11 +696,11 @@ function ConfigurationPage() {
             Configure your target roles, locations, and personal profile
           </p>
         </div>
-        <button onClick={handleSave} disabled={saving} className="btn btn-primary">{saving ? 'Saving...' : 'Save Changes'}</button>
+        <button onClick={handleSave} disabled={saving} className="btn btn-primary">{saving ? 'Saving...' : (dirty ? 'Save Changes •' : 'Save Changes')}</button>
       </div>
       {message && <div style={{ color: message.startsWith('✓') ? 'var(--success)' : 'var(--danger)', marginBottom: '1rem' }}>{message}</div>}
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(400px, 1fr))', gap: '2rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(400px, 100%), 1fr))', gap: '2rem' }}>
         <div className="config-section">
           <h3>Personal Profile</h3>
           <div className="form-group">
@@ -776,112 +771,22 @@ function ConfigurationPage() {
         </div>
 
         <div className="config-section">
-          <h3>Target Specs</h3>
-          <div className="form-group">
-            <label>Job Keywords (comma-separated, full spaces allowed)</label>
-            <input
-              type="text"
-              placeholder="e.g. Account Manager, Inside Sales, Customer Success"
-              value={keywordsStr}
-              onChange={(e) => setKeywordsStr(e.target.value)}
-            />
-          </div>
-          <div className="form-group">
-            <label>Preferred Locations (comma-separated)</label>
-            <input
-              type="text"
-              placeholder="e.g. Portland, OR, Remote"
-              value={locationsStr}
-              onChange={(e) => setLocationsStr(e.target.value)}
-            />
-          </div>
+          <h3>Contact details</h3>
+          <p className="section-sub">Used when a form asks for city, ZIP or LinkedIn URL and LinkedIn didn't pre-fill it.</p>
+          <ContactPanel config={config} update={update} />
         </div>
 
         <div className="config-section" style={{ gridColumn: '1 / -1' }}>
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '1.25rem', flexWrap: 'wrap', gap: '1rem' }}>
-            <div>
-              <h3>⚡ Automated Screening Questions</h3>
-              <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginTop: '0.2rem' }}>
-                Pre-configure standard screening answers so the agent can safely handle Easy Apply questionnaires and submit without stalling.
-              </p>
-            </div>
-            <label style={{ display: 'flex', alignItems: 'center', gap: '0.6rem', cursor: 'pointer', fontSize: '0.85rem', background: 'rgba(255,255,255,0.05)', padding: '0.5rem 0.8rem', borderRadius: '8px', border: '1px solid rgba(255,255,255,0.1)' }}>
-              <input
-                type="checkbox"
-                checked={autoAnswer}
-                onChange={(e) => setAutoAnswer(e.target.checked)}
-                style={{ width: '18px', height: '18px', cursor: 'pointer' }}
-              />
-              <span style={{ fontWeight: '600', color: autoAnswer ? 'var(--success)' : 'var(--text-muted)' }}>
-                {autoAnswer ? '✓ Auto-Answer Enabled' : 'Strict Resume-Only (Skip Questions)'}
-              </span>
-            </label>
+          <div className="settings-tabs" role="tablist">
+            {[['search', 'Job search'], ['salary', 'Salary'], ['screening', 'Screening answers'], ['pacing', 'Pacing']].map(([id, label]) => (
+              <button key={id} role="tab" aria-selected={settingsTab === id}
+                className={`settings-tab ${settingsTab === id ? 'active' : ''}`} onClick={() => setSettingsTab(id)}>{label}</button>
+            ))}
           </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '1.25rem' }}>
-            <div className="form-group">
-              <label>US Work Authorization</label>
-              <select value={workAuth} onChange={(e) => setWorkAuth(e.target.value)}>
-                <option value="Yes">Yes (Authorized to work in US)</option>
-                <option value="No">No</option>
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label>Require Visa Sponsorship</label>
-              <select value={sponsorship} onChange={(e) => setSponsorship(e.target.value)}>
-                <option value="No">No (Will not require sponsorship)</option>
-                <option value="Yes">Yes (Require sponsorship)</option>
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label>Remote Work Preference</label>
-              <select value={remotePref} onChange={(e) => setRemotePref(e.target.value)}>
-                <option value="Yes">Yes (Comfortable working remotely)</option>
-                <option value="No">No</option>
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label>Willing to Relocate</label>
-              <select value={relocate} onChange={(e) => setRelocate(e.target.value)}>
-                <option value="No">No</option>
-                <option value="Yes">Yes</option>
-              </select>
-            </div>
-
-            <div className="form-group">
-              <label>Default Experience (Years)</label>
-              <input
-                type="number"
-                min="0"
-                max="40"
-                value={expYears}
-                onChange={(e) => setExpYears(e.target.value)}
-              />
-            </div>
-
-            <div className="form-group">
-              <label>Expected Annual Salary ($ USD)</label>
-              <input
-                type="text"
-                placeholder="e.g. 120000"
-                value={expectedSalary}
-                onChange={(e) => setExpectedSalary(e.target.value)}
-              />
-            </div>
-
-            <div className="form-group">
-              <label>Earliest Start Date / Notice</label>
-              <input
-                type="text"
-                placeholder="e.g. Immediately or 2 weeks"
-                value={startDate}
-                onChange={(e) => setStartDate(e.target.value)}
-              />
-            </div>
-          </div>
+          {settingsTab === 'search' && <SearchPanel config={config} update={update} />}
+          {settingsTab === 'salary' && <SalaryPanel config={config} update={update} />}
+          {settingsTab === 'screening' && <ScreeningPanel config={config} update={update} />}
+          {settingsTab === 'pacing' && <PacingPanel config={config} update={update} />}
         </div>
       </div>
     </div>
@@ -1226,6 +1131,474 @@ function ApplicationsPage() {
   )
 }
 
+// Tracker Page
+function TrackerPage() {
+  const [trackerData, setTrackerData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [syncing, setSyncing] = useState(false)
+  const [syncMsg, setSyncMsg] = useState('')
+  const [expandedAppId, setExpandedAppId] = useState(null)
+  const [notesState, setNotesState] = useState({})
+  const [assignSelections, setAssignSelections] = useState({})
+
+  const loadData = async () => {
+    try {
+      const data = await API.getTracker()
+      setTrackerData(data)
+      const notes = {}
+      (data.applications || []).forEach(a => {
+        notes[a.id] = a.tracking?.notes || ''
+      })
+      setNotesState(notes)
+    } catch (err) {
+      console.error(err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    loadData()
+  }, [])
+
+  const handleSync = async () => {
+    setSyncing(true)
+    setSyncMsg('Starting sync with Gmail & LinkedIn...')
+    try {
+      await API.syncTracker({ gmail: true, linkedin: true, days: 30 })
+      const interval = setInterval(async () => {
+        try {
+          const st = await API.getSyncStatus()
+          if (!st.running) {
+            clearInterval(interval)
+            setSyncing(false)
+            setSyncMsg(st.last_result ? `Sync complete: ${JSON.stringify(st.last_result)}` : 'Sync complete!')
+            loadData()
+          } else {
+            setSyncMsg('Syncing emails and application statuses in background...')
+          }
+        } catch {
+          clearInterval(interval)
+          setSyncing(false)
+        }
+      }, 3000)
+    } catch (err) {
+      setSyncing(false)
+      setSyncMsg(`Sync error: ${err.message || 'Failed'}`)
+    }
+  }
+
+  const handleSendDigest = async () => {
+    try {
+      await API.sendDigest()
+      alert('Daily summary email sent successfully!')
+    } catch (err) {
+      alert(`Could not send summary email: ${err.message || err}`)
+    }
+  }
+
+  const handleStageChange = async (appId, newStage) => {
+    try {
+      await API.updateTrackerApp(appId, { stage: newStage })
+      loadData()
+    } catch (err) {
+      alert(`Could not update stage: ${err.message || err}`)
+    }
+  }
+
+  const handleSaveNotes = async (appId) => {
+    try {
+      await API.updateTrackerApp(appId, { notes: notesState[appId] || '' })
+      alert('Notes saved!')
+      loadData()
+    } catch (err) {
+      alert(`Could not save notes: ${err.message || err}`)
+    }
+  }
+
+  const handleMarkFollowUpDone = async (appId) => {
+    try {
+      await API.updateTrackerApp(appId, { follow_up_done: true })
+      loadData()
+    } catch (err) {
+      alert(`Could not mark follow-up done: ${err.message || err}`)
+    }
+  }
+
+  const handleCopyPitch = async (appId, fallbackNote) => {
+    try {
+      const res = await API.getRecruiterNote(appId)
+      const note = res.note || fallbackNote || ''
+      navigator.clipboard.writeText(note)
+      alert('Copied recruiter pitch note to clipboard!')
+    } catch {
+      navigator.clipboard.writeText(fallbackNote || '')
+      alert('Copied recruiter pitch note to clipboard!')
+    }
+  }
+
+  const handleAssignEmail = async (msgId) => {
+    const appId = assignSelections[msgId]
+    if (!appId) {
+      alert('Please select an application to assign.')
+      return
+    }
+    try {
+      await API.assignUnmatched(msgId, appId)
+      alert('Email assigned successfully!')
+      loadData()
+    } catch (err) {
+      alert(`Could not assign email: ${err.message || err}`)
+    }
+  }
+
+  if (loading) return <div className="loading shimmer">Loading Tracker...</div>
+  if (!trackerData) return <div className="page glass"><p>Could not load tracker data.</p></div>
+
+  const { stats, applications = [], follow_ups_due = [], unmatched_emails = [], stages = [], gmail_configured } = trackerData
+  const dueApps = applications.filter(a => follow_ups_due.includes(a.id))
+
+  return (
+    <div className="page glass">
+      <div className="page-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '1rem', marginBottom: '2rem' }}>
+        <div>
+          <h1>Application & Reply Tracker</h1>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.85rem', marginTop: '0.25rem' }}>
+            Full lifecycle tracking: responses, interviews, recruiter outreach, and application audit history
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+          <button className="btn btn-secondary" onClick={handleSendDigest} style={{ fontSize: '0.82rem' }}>
+            ✉️ Email Summary
+          </button>
+          <button className="btn btn-primary" onClick={handleSync} disabled={syncing} style={{ fontSize: '0.82rem' }}>
+            {syncing ? '⏳ Syncing...' : '🔄 Sync Replies'}
+          </button>
+        </div>
+      </div>
+
+      {syncMsg && (
+        <div style={{ background: 'rgba(6, 182, 212, 0.1)', border: '1px solid rgba(6, 182, 212, 0.3)', padding: '0.65rem 1rem', borderRadius: '8px', fontSize: '0.82rem', marginBottom: '1.5rem', color: 'var(--text-main)' }}>
+          {syncMsg}
+        </div>
+      )}
+
+      {!gmail_configured && (
+        <div style={{ background: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.3)', padding: '0.75rem 1rem', borderRadius: '10px', fontSize: '0.83rem', marginBottom: '1.5rem', color: '#fef08a' }}>
+          💡 <strong>Tip: Gmail IMAP reply detection is not configured.</strong> To automatically scan recruiter replies, interview invites, and rejection notices, copy <code>.env.example</code> to <code>.env</code> and set <code>GMAIL_USER</code> and your 16-character <code>GMAIL_APP_PASSWORD</code>.
+        </div>
+      )}
+
+      {/* STAT CARDS */}
+      <div className="stats-grid" style={{ marginBottom: '2rem' }}>
+        <div className="stat-card">
+          <div className="stat-title">Submitted</div>
+          <div className="stat-value">{stats?.total_submitted || 0}</div>
+          <div className="stat-desc">Confirmed applications</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-title">Viewed Rate</div>
+          <div className="stat-value" style={{ color: 'var(--primary)' }}>{stats?.viewed_rate_pct || 0}%</div>
+          <div className="stat-desc">{stats?.viewed || 0} applications opened</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-title">Reply Rate</div>
+          <div className="stat-value" style={{ color: 'var(--success)' }}>{stats?.reply_rate_pct || 0}%</div>
+          <div className="stat-desc">{stats?.replied || 0} received recruiter response</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-title">Interviews</div>
+          <div className="stat-value" style={{ color: '#ec4899' }}>{stats?.interviews || 0}</div>
+          <div className="stat-desc">Phone / technical screenings</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-title">Submit Rate</div>
+          <div className="stat-value">{stats?.submit_rate_pct || 0}%</div>
+          <div className="stat-desc">{stats?.total_submitted || 0} of {stats?.total_attempted || 0} attempted</div>
+        </div>
+      </div>
+
+      {/* FOLLOW-UPS DUE */}
+      {dueApps.length > 0 && (
+        <div className="config-section" style={{ marginBottom: '2rem', border: '1px solid rgba(6, 182, 212, 0.4)', background: 'rgba(6, 182, 212, 0.05)' }}>
+          <h3 style={{ color: 'var(--primary)', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+            ⏰ Follow-ups Due ({dueApps.length})
+          </h3>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginBottom: '1rem' }}>
+            Recruiters for these positions viewed your profile or have been waiting 24+ hours. Send a quick outreach note to stand out!
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {dueApps.map(a => (
+              <div key={a.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.03)', padding: '0.85rem 1rem', borderRadius: '8px', flexWrap: 'wrap', gap: '0.75rem' }}>
+                <div>
+                  <div style={{ fontWeight: '600', fontSize: '0.9rem' }}>{a.job?.title} @ {a.job?.company}</div>
+                  <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.2rem' }}>
+                    Recruiter: {a.recruiter_name ? (
+                      a.recruiter_url ? (
+                        <a href={a.recruiter_url} target="_blank" rel="noreferrer" style={{ color: 'var(--primary)', textDecoration: 'underline' }}>
+                          {a.recruiter_name} ↗
+                        </a>
+                      ) : a.recruiter_name
+                    ) : 'Hiring Team'}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                  <button className="btn btn-secondary" onClick={() => handleCopyPitch(a.id, a.follow_up_note)} style={{ padding: '0.35rem 0.7rem', fontSize: '0.78rem' }}>
+                    📋 Copy Note
+                  </button>
+                  {a.recruiter_url && (
+                    <a href={a.recruiter_url} target="_blank" rel="noreferrer" className="btn btn-secondary" style={{ padding: '0.35rem 0.7rem', fontSize: '0.78rem', textDecoration: 'none' }}>
+                      👤 View Profile
+                    </a>
+                  )}
+                  <button className="btn btn-primary" onClick={() => handleMarkFollowUpDone(a.id)} style={{ padding: '0.35rem 0.7rem', fontSize: '0.78rem' }}>
+                    ✓ Mark Done
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* SKIP REASONS & BY TITLE */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
+        <div className="config-section">
+          <h3>Why Jobs Were Skipped</h3>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginBottom: '1rem' }}>
+            Safeguard reasons protecting you from applying to mismatched jobs
+          </p>
+          {stats?.skip_reasons && Object.keys(stats.skip_reasons).length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              {Object.entries(stats.skip_reasons).map(([reason, count]) => (
+                <div key={reason} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.45rem 0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', fontSize: '0.83rem' }}>
+                  <span style={{ textTransform: 'capitalize' }}>{reason.replace(/_/g, ' ')}</span>
+                  <span style={{ fontWeight: '600', color: 'var(--text-muted)' }}>{count}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">No jobs skipped yet.</p>
+          )}
+        </div>
+
+        <div className="config-section">
+          <h3>Performance by Title</h3>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginBottom: '1rem' }}>
+            Response and submission volume grouped by target job title
+          </p>
+          {stats?.by_title && Object.keys(stats.by_title).length > 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+              {Object.entries(stats.by_title).slice(0, 5).map(([title, st]) => (
+                <div key={title} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.45rem 0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', fontSize: '0.83rem' }}>
+                  <span style={{ fontWeight: '500' }}>{title}</span>
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                    {st.submitted} submitted · {st.replied} replied
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="muted">No title data recorded yet.</p>
+          )}
+        </div>
+      </div>
+
+      {/* APPLICATIONS TRACKER TABLE */}
+      <div className="config-section">
+        <h3>Applications Tracking & Auditing</h3>
+        <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '1.25rem' }}>
+          Live status of every submission, recruiter follow-up pitch, and exact answers submitted
+        </p>
+
+        {applications.length === 0 ? (
+          <p className="muted" style={{ padding: '2rem', textAlign: 'center' }}>No applications tracked yet.</p>
+        ) : (
+          <div className="table-container">
+            <table>
+              <thead>
+                <tr>
+                  <th>Applied</th>
+                  <th>Role & Company</th>
+                  <th>Stage</th>
+                  <th>Recruiter</th>
+                  <th>Notes</th>
+                  <th>Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {applications.map(a => {
+                  const isExpanded = expandedAppId === a.id
+                  const currStage = a.tracking?.stage || (a.status === 'submitted' ? 'applied' : a.status)
+                  return (
+                    <React.Fragment key={a.id}>
+                      <tr>
+                        <td style={{ fontSize: '0.8rem', color: 'var(--text-muted)', whiteSpace: 'nowrap' }}>
+                          {new Date(a.applied_at || a.timestamp || Date.now()).toLocaleDateString()}
+                        </td>
+                        <td>
+                          <div style={{ fontWeight: '600' }}>
+                            <a href={a.job?.url} target="_blank" rel="noreferrer" style={{ color: 'var(--text-main)', textDecoration: 'none' }}>
+                              {a.job?.title} ↗
+                            </a>
+                          </div>
+                          <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>{a.job?.company} · {a.job?.location}</div>
+                        </td>
+                        <td>
+                          <select
+                            value={currStage}
+                            onChange={(e) => handleStageChange(a.id, e.target.value)}
+                            style={{ padding: '0.3rem 0.5rem', fontSize: '0.8rem', borderRadius: '6px' }}
+                          >
+                            {stages.map(s => (
+                              <option key={s} value={s}>{s}</option>
+                            ))}
+                          </select>
+                        </td>
+                        <td>
+                          {a.recruiter_name ? (
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem' }}>
+                              {a.recruiter_url ? (
+                                <a href={a.recruiter_url} target="_blank" rel="noreferrer" style={{ fontSize: '0.82rem', color: 'var(--primary)', textDecoration: 'underline' }}>
+                                  👤 {a.recruiter_name}
+                                </a>
+                              ) : (
+                                <span style={{ fontSize: '0.82rem' }}>👤 {a.recruiter_name}</span>
+                              )}
+                              <button
+                                className="btn btn-secondary"
+                                onClick={() => handleCopyPitch(a.id, a.follow_up_note)}
+                                style={{ padding: '0.2rem 0.45rem', fontSize: '0.72rem' }}
+                              >
+                                📋 Pitch
+                              </button>
+                            </div>
+                          ) : (
+                            <span className="muted">Direct Easy Apply</span>
+                          )}
+                        </td>
+                        <td>
+                          <div style={{ display: 'flex', gap: '0.35rem' }}>
+                            <input
+                              type="text"
+                              value={notesState[a.id] ?? ''}
+                              onChange={(e) => setNotesState({ ...notesState, [a.id]: e.target.value })}
+                              placeholder="Add notes..."
+                              style={{ width: '130px', padding: '0.3rem 0.5rem', fontSize: '0.78rem' }}
+                            />
+                            <button
+                              className="btn btn-secondary"
+                              onClick={() => handleSaveNotes(a.id)}
+                              style={{ padding: '0.25rem 0.5rem', fontSize: '0.72rem' }}
+                            >
+                              Save
+                            </button>
+                          </div>
+                        </td>
+                        <td>
+                          <button
+                            className="btn btn-secondary"
+                            onClick={() => setExpandedAppId(isExpanded ? null : a.id)}
+                            style={{ padding: '0.3rem 0.6rem', fontSize: '0.76rem' }}
+                          >
+                            {isExpanded ? '▲ Hide' : '▼ Details'}
+                          </button>
+                        </td>
+                      </tr>
+
+                      {/* EXPANDED DETAILS ROW */}
+                      {isExpanded && (
+                        <tr>
+                          <td colSpan="6" style={{ background: 'rgba(255,255,255,0.02)', padding: '1rem 1.5rem' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem' }}>
+                              {/* TIMELINE */}
+                              <div>
+                                <h4 style={{ fontSize: '0.85rem', marginBottom: '0.5rem', color: 'var(--primary)' }}>
+                                  📜 Lifecycle Events
+                                </h4>
+                                {a.tracking?.events && a.tracking.events.length > 0 ? (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                                    {a.tracking.events.map((ev, idx) => (
+                                      <div key={idx} style={{ fontSize: '0.78rem', background: 'rgba(255,255,255,0.03)', padding: '0.45rem 0.75rem', borderRadius: '6px' }}>
+                                        <div style={{ color: 'var(--text-muted)' }}>{new Date(ev.at).toLocaleString()} · <em>{ev.source}</em></div>
+                                        <div style={{ fontWeight: '500', marginTop: '0.15rem' }}>{ev.type}: {ev.detail || 'Event recorded'}</div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="muted">No external lifecycle events recorded yet.</p>
+                                )}
+                              </div>
+
+                              {/* ANSWERS GIVEN */}
+                              <div>
+                                <h4 style={{ fontSize: '0.85rem', marginBottom: '0.5rem', color: 'var(--success)' }}>
+                                  📝 Screening Answers Submitted
+                                </h4>
+                                {a.answers_given && Object.keys(a.answers_given).length > 0 ? (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
+                                    {Object.entries(a.answers_given).map(([q, ans]) => (
+                                      <div key={q} style={{ fontSize: '0.78rem', background: 'rgba(255,255,255,0.03)', padding: '0.45rem 0.75rem', borderRadius: '6px' }}>
+                                        <div style={{ color: 'var(--text-muted)' }}>Q: {q}</div>
+                                        <div style={{ fontWeight: '600', color: 'var(--text-main)', marginTop: '0.1rem' }}>Answer: {String(ans)}</div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <p className="muted">Standard 1-step profile & resume submission (no screening questions required).</p>
+                                )}
+                              </div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* UNMATCHED EMAILS */}
+      {unmatched_emails.length > 0 && (
+        <div className="config-section" style={{ marginTop: '2rem' }}>
+          <h3>Unmatched Recruiter Emails ({unmatched_emails.length})</h3>
+          <p style={{ color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: '1rem' }}>
+            Job-related emails received that could not be automatically mapped to an existing application
+          </p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
+            {unmatched_emails.map((m, idx) => (
+              <div key={m.message_id || idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', background: 'rgba(255,255,255,0.02)', padding: '0.75rem 1rem', borderRadius: '8px', flexWrap: 'wrap', gap: '0.5rem' }}>
+                <div>
+                  <div style={{ fontWeight: '600', fontSize: '0.85rem' }}>{m.subject || '(No Subject)'}</div>
+                  <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>From: {m.from} · {new Date(m.date).toLocaleDateString()}</div>
+                </div>
+                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                  <select
+                    value={assignSelections[m.message_id] || ''}
+                    onChange={(e) => setAssignSelections({ ...assignSelections, [m.message_id]: e.target.value })}
+                    style={{ padding: '0.35rem 0.5rem', fontSize: '0.78rem', maxWidth: '240px' }}
+                  >
+                    <option value="">Select Application...</option>
+                    {applications.map(a => (
+                      <option key={a.id} value={a.id}>{a.job?.company} - {a.job?.title}</option>
+                    ))}
+                  </select>
+                  <button className="btn btn-primary" onClick={() => handleAssignEmail(m.message_id)} style={{ padding: '0.35rem 0.7rem', fontSize: '0.78rem' }}>
+                    Assign
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -1233,7 +1606,7 @@ export default function App() {
         <div className="app">
           <Routes>
             <Route path="/login" element={<LoginPage />} />
-            <Route path="/*" element={<ProtectedRoute><Navbar /><main className="content"><Routes><Route path="/" element={<Dashboard />} /><Route path="/queue" element={<JobQueuePage />} /><Route path="/applications" element={<ApplicationsPage />} /><Route path="/config" element={<ConfigurationPage />} /><Route path="*" element={<Navigate to="/" />} /></Routes></main></ProtectedRoute>} />
+            <Route path="/*" element={<ProtectedRoute><Navbar /><main className="content"><Routes><Route path="/" element={<Dashboard />} /><Route path="/queue" element={<JobQueuePage />} /><Route path="/applications" element={<ApplicationsPage />} /><Route path="/tracker" element={<TrackerPage />} /><Route path="/config" element={<ConfigurationPage />} /><Route path="*" element={<Navigate to="/" />} /></Routes></main></ProtectedRoute>} />
           </Routes>
         </div>
       </AuthProvider>

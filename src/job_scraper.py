@@ -10,6 +10,7 @@ from src.application_guard import ApplicationGuard
 from datetime import datetime, timedelta
 import asyncio
 import logging
+import re
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -294,26 +295,60 @@ class JobScraper:
         logger.info(f"Scraped {len(jobs)} Indeed jobs")
         return jobs
     
+    # Settings -> LinkedIn search URL codes
+    WORK_TYPE_CODES = {"onsite": "1", "remote": "2", "hybrid": "3"}
+    EXPERIENCE_CODES = {"internship": "1", "entry": "2", "associate": "3", "mid_senior": "4", "director": "5", "executive": "6"}
+
     def _build_linkedin_search_url(self, title: str, location: str, days_ago: int) -> str:
-        """Build LinkedIn search URL."""
-        # LinkedIn time filter: r86400 = 24hrs, r604800 = 7days, r1209600 = 14days
-        time_filter = "r1209600" if days_ago >= 14 else ("r604800" if days_ago >= 7 else "r86400")
-        
-        title_encoded = title.replace(" ", "%20")
-        location_encoded = location.replace(" ", "%20").replace(",", "%2C")
-        
-        # Add Easy Apply filter: f_AL=true
-        url = (
-            f"https://www.linkedin.com/jobs/search/?"
-            f"keywords={title_encoded}&"
-            f"location={location_encoded}&"
-            f"f_TPR={time_filter}&"
-            f"f_AL=true&"
-            f"refresh=true"  # Force fresh results
-        )
-        
-        return url
-    
+        """LinkedIn search URL built from the user's search settings (config["search"])."""
+        from urllib.parse import urlencode
+        from src.salary import linkedin_salary_filter
+
+        search = self.config.get("search", {}) or {}
+        work_types = [w.lower() for w in (search.get("work_types") or [])]
+        loc = (location or "").strip()
+        if loc.lower() in ("remote", "anywhere", "remote (us)"):
+            loc = "United States"
+            if "remote" not in work_types:
+                work_types.append("remote")
+
+        days = int(days_ago or search.get("posted_within_days") or 14)
+        params = {
+            "keywords": title,
+            "location": loc,
+            "f_TPR": f"r{max(1, days) * 86400}",
+            "f_AL": "true",          # Easy Apply only
+        }
+        wt = [self.WORK_TYPE_CODES[w] for w in work_types if w in self.WORK_TYPE_CODES]
+        if wt:
+            params["f_WT"] = ",".join(sorted(set(wt)))
+        ex = [self.EXPERIENCE_CODES[e] for e in (search.get("experience_levels") or []) if e in self.EXPERIENCE_CODES]
+        if ex:
+            params["f_E"] = ",".join(sorted(set(ex)))
+        dist = search.get("distance_miles")
+        if dist and loc.lower() != "united states":
+            params["distance"] = str(int(dist))
+        sb2 = linkedin_salary_filter(self.config)
+        if sb2:
+            params["f_SB2"] = str(sb2)
+        params["refresh"] = "true"
+        return "https://www.linkedin.com/jobs/search/?" + urlencode(params)
+
+    def excluded_reason(self, job: Job):
+        """Title word or company on the user's exclude lists -> reason string, else None."""
+        search = self.config.get("search", {}) or {}
+        title = f" {(job.title or '').lower()} "
+        for w in search.get("exclude_title_words") or []:
+            w = str(w).strip().lower()
+            if w and re.search(r"(?<![a-z0-9])" + re.escape(w) + r"(?![a-z0-9])", title):
+                return f"Title contains excluded word '{w}'"
+        company = (job.company or "").lower()
+        for c in search.get("exclude_companies") or []:
+            c = str(c).strip().lower()
+            if c and c in company:
+                return f"Excluded company '{c}'"
+        return None
+
     def _build_indeed_search_url(self, title: str, location: str, days_ago: int) -> str:
         """Build Indeed search URL."""
         title_encoded = title.replace(" ", "+")
@@ -449,7 +484,12 @@ class GuardedJobScraper(JobScraper):
                                 job.location = (await el.inner_text()).strip()
                                 break
                     
-                    guard_result = await self.guard.check_linkedin_job(page)
+                    reason = self.excluded_reason(job)
+                    if reason:
+                        from src.application_guard import GuardResult
+                        guard_result = GuardResult(GuardStatus.SKIP_EXCLUDED, reason)
+                    else:
+                        guard_result = await self.guard.check_linkedin_job(page)
                 elif job.platform == Platform.INDEED:
                     # Update info if unknown (Indeed specific)
                     if job.title == "Unknown":
@@ -473,6 +513,23 @@ class GuardedJobScraper(JobScraper):
                                 job.description = (await desc_el.inner_text()).strip()
                         except Exception as e:
                             logger.debug(f"Could not fetch job description: {e}")
+                        # Posted pay vs. the user's minimum
+                        try:
+                            from src.salary import parse_salary_range, below_minimum
+                            top = page.locator('.job-details-jobs-unified-top-card__container--two-pane, .jobs-unified-top-card, .job-details-fit-level-preferences, main').first
+                            top_text = (await top.inner_text())[:4000] if await top.count() else ""
+                            posted = parse_salary_range(top_text) or parse_salary_range(job.description or "")
+                            if posted:
+                                job.posted_salary = f"${posted[0]:,} - ${posted[1]:,} /yr"
+                                job.salary_range = job.posted_salary
+                            if below_minimum(posted, self.config):
+                                job.guard_status = GuardStatus.SKIP_SALARY
+                                job.guard_reason = f"Posted pay {job.posted_salary} is below your minimum"
+                                logger.info(f"✗ SKIP: {job.guard_reason} - {job.title} at {job.company}")
+                                await asyncio.sleep(2)
+                                continue
+                        except Exception as e:
+                            logger.debug(f"Could not read salary: {e}")
                         # Extract Hiring Team / Recruiter info (LinkedHelper best practice for direct follow-up)
                         try:
                             hirer = page.locator('.hirer-card__hirer-information, .jobs-poster, [class*="hirer-card"], .message-the-recruiter').first

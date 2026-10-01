@@ -11,6 +11,7 @@ Phase 4: Job Ranking
 from typing import List
 
 from src.models import Resume, Job
+from src.skill_match import find_skills, matched_skills as _matched_skills, _key_for as canon
 
 import logging
 
@@ -99,8 +100,9 @@ class JobRanker:
         job.location_match = location_score / 0.10
 
         job.match_score = round(total_score, 3)
-        matched = [s.title() for s in self.resume_skills_set.intersection(job_skills) if s]
-        job.matched_skills = sorted(matched)
+        # Badges: skills in BOTH resume and job text, correct casing, most specific first
+        job.matched_skills = _matched_skills(self.resume.technical_skills + self.resume.soft_skills,
+                                             f"{job.title}\n{job.description}")
 
         
 
@@ -171,78 +173,15 @@ class JobRanker:
     
 
     def _extract_skills_from_description(self, description: str) -> set:
-
-        """Extract technical skills mentioned in job description."""
-
-        desc_lower = description.lower()
-
-        
-
-        # Common tech skills
-
-        all_skills = [
-
-            "python", "javascript", "java", "c++", "c#", "ruby", "go", "rust",
-
-            "react", "angular", "vue", "node", "django", "flask", "spring",
-
-            "sql", "postgresql", "mysql", "mongodb", "redis",
-
-            "aws", "azure", "gcp", "docker", "kubernetes", "git",
-
-            "html", "css", "typescript", "php", "swift", "kotlin",
-
-            "api", "rest", "graphql", "microservices"
-
-        ]
-
-        
-
-        found_skills = set()
-
-        for skill in all_skills:
-
-            if skill in desc_lower:
-
-                found_skills.add(skill)
-
-        
-
-        return found_skills
-
-    
+        """Skills mentioned in the job text - whole words only (see src/skill_match.py)."""
+        return set(find_skills(description, extra_skills=self.resume.technical_skills))
 
     def _score_skill_match(self, job_skills: set) -> float:
-
-        """
-
-        Score skill match between resume and job.
-
-        
-
-        Returns:
-
-            0.0 to 1.0
-
-        """
-
+        """Share of the job's recognised skills that the resume also has (0.5 if none recognised)."""
         if not job_skills:
-
-            return 0.5  # Neutral if no skills listed
-
-        
-
-        # Calculate overlap
-
-        overlap = self.resume_skills_set & job_skills
-
-        match_ratio = len(overlap) / len(job_skills)
-
-        
-
-        return min(match_ratio, 1.0)
-
-    
+            return 0.5
+        resume_keys = {canon(s) for s in self.resume.technical_skills + self.resume.soft_skills}
+        return min(len(resume_keys & job_skills) / len(job_skills), 1.0)
 
     def _score_title_match(self, job_title: str) -> float:
 

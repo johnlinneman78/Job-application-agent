@@ -106,46 +106,109 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     user: dict
 
-class JobSearchConfig(BaseModel):
-    keywords: List[str]
-    locations: List[str]
-    seniority: List[str]
+from pydantic import ConfigDict
+
+
+class _Open(BaseModel):
+    # Keep any extra keys the UI sends instead of silently dropping them
+    model_config = ConfigDict(extra="allow")
+
+
+class JobSearchConfig(_Open):
+    keywords: List[str] = []
+    locations: List[str] = []
+    seniority: List[str] = []                     # legacy, unused by the scraper
     platforms: List[str] = ["linkedin"]
     max_applications: int = 10
-    posted_within_days: int = 14
+    posted_within_days: int = 14                  # 1, 3, 7, 14, 30
+    work_types: List[str] = []                    # "remote", "hybrid", "onsite" (empty = any)
+    experience_levels: List[str] = []             # "internship","entry","associate","mid_senior","director","executive"
+    distance_miles: Optional[int] = None          # 10, 25, 50, 100 (ignored for "United States"/"Remote")
+    exclude_title_words: List[str] = []           # e.g. ["senior", "director", "commission only"]
+    exclude_companies: List[str] = []
 
-class PersonalInfo(BaseModel):
-    name: str
-    email: EmailStr
-    phone: str
-    address: str
-    city: str
-    state: str
-    zip_code: str
-    years_of_experience: int
+
+class PersonalInfo(_Open):
+    name: str = ""
+    email: str = ""
+    phone: str = ""
+    address: str = ""
+    city: str = ""
+    state: str = ""
+    zip_code: str = ""
+    years_of_experience: int = 0
     linkedin_url: Optional[str] = None
     portfolio_url: Optional[str] = None
     resume_path: Optional[str] = None
 
-class ApplicationSettings(BaseModel):
-    min_delay: int = 120
-    max_delay: int = 300
+
+class ApplicationSettings(_Open):
+    min_delay: int = 30
+    max_delay: int = 90
     auto_answer_screening: bool = True
 
-class ScreeningAnswers(BaseModel):
-    work_authorization: str = "Yes"
-    require_sponsorship: str = "No"
-    remote_preference: str = "Yes"
-    willing_to_relocate: str = "No"
-    expected_salary: str = "120000"
-    start_date: str = "Immediately"
-    default_experience_years: int = 4
 
-class Configuration(BaseModel):
-    personal_info: PersonalInfo
-    search: JobSearchConfig
-    application: ApplicationSettings
-    screening_answers: ScreeningAnswers
+class SalarySettings(_Open):
+    salary_min: Optional[int] = None              # lowest annual pay you'll accept
+    salary_max: Optional[int] = None              # top of your target range
+    salary_target: Optional[int] = None           # what to answer "desired salary" with (blank = middle of range)
+    skip_if_listed_below_min: bool = True         # skip jobs whose posted top pay < salary_min
+    only_listed_salary: bool = False              # LinkedIn filter: only jobs that list pay (hides most jobs)
+
+
+class ScreeningAnswers(_Open):
+    """Answers the bot may submit for you (src/screening_answers.py).
+    Blank = never answer that question -> the job is skipped instead."""
+    work_authorization: str = ""
+    require_sponsorship: str = ""
+    located_in_us: str = ""
+    remote_preference: str = ""
+    onsite_ok: str = ""
+    commute_ok: str = ""
+    willing_to_relocate: str = ""
+    start_date: str = ""
+    years_experience: str = ""
+    sales_experience: str = ""
+    skill_years: dict = {}                        # e.g. {"salesforce": 3, "crm": 6}
+    bachelors_degree: str = ""
+    high_school: str = ""
+    english_proficiency: str = ""
+    background_check_ok: str = ""
+    drug_test_ok: str = ""
+    drivers_license: str = ""
+    gender: str = ""
+    race: str = ""
+    veteran: str = ""
+    disability: str = ""
+    expected_salary: str = ""                     # legacy - use SalarySettings
+
+
+class Configuration(_Open):
+    personal_info: PersonalInfo = PersonalInfo()
+    search: JobSearchConfig = JobSearchConfig()
+    application: ApplicationSettings = ApplicationSettings()
+    salary: SalarySettings = SalarySettings()
+    screening_answers: ScreeningAnswers = ScreeningAnswers()
+
+
+def default_config(user: dict) -> dict:
+    cfg = Configuration().model_dump()
+    cfg["personal_info"].update({"name": user.get("full_name", ""), "email": user.get("email", "")})
+    cfg["search"].update({"keywords": ["account manager", "inside sales"], "locations": ["Portland, OR"],
+                          "work_types": ["remote", "hybrid"]})
+    return cfg
+
+
+def merge_defaults(stored: dict, user: dict) -> dict:
+    """Stored settings on top of defaults, so new settings show up for existing users."""
+    base = default_config(user)
+    for section, values in (stored or {}).items():
+        if isinstance(values, dict) and isinstance(base.get(section), dict):
+            base[section].update(values)
+        else:
+            base[section] = values
+    return base
+
 
 class JobSchema(BaseModel):
     id: str
@@ -327,46 +390,7 @@ async def logout(current_user: dict = Depends(get_current_user)):
 @app.get("/api/config")
 async def get_config(current_user: dict = Depends(get_current_user)):
     """Get user configuration."""
-    config = configs_db.get(current_user["email"])
-    if not config:
-        # Return default configuration
-        return {
-            "personal_info": {
-                "name": current_user["full_name"],
-                "email": current_user["email"],
-                "phone": "",
-                "address": "",
-                "city": "",
-                "state": "",
-                "zip_code": "",
-                "years_of_experience": 0,
-                "linkedin_url": "",
-                "portfolio_url": ""
-            },
-            "search": {
-                "keywords": ["customer service", "sales"],
-                "locations": ["Remote"],
-                "seniority": ["Entry Level"],
-                "platforms": ["linkedin"],
-                "max_applications": 10,
-                "posted_within_days": 14
-            },
-            "application": {
-                "min_delay": 10,
-                "max_delay": 30,
-                "auto_answer_screening": True
-            },
-            "screening_answers": {
-                "work_authorization": "Yes",
-                "require_sponsorship": "No",
-                "remote_preference": "Yes",
-                "willing_to_relocate": "No",
-                "expected_salary": "120000",
-                "start_date": "Immediately",
-                "default_experience_years": 4
-            }
-        }
-    return config
+    return merge_defaults(configs_db.get(current_user["email"]), current_user)
 
 @app.put("/api/config")
 async def update_config(config: Configuration, current_user: dict = Depends(get_current_user)):
@@ -478,16 +502,14 @@ async def trigger_job_search(
                         except Exception as e:
                             logger.warning(f"Could not score job {job.title}: {e}")
 
-                    # Generate personalized follow-up note template if recruiter is found (LinkedHelper tip)
+                    # Recruiter note for the queue. Says "interested", not "applied",
+                    # because nothing has been submitted yet (rebuilt after a real submit).
                     follow_up_note = ""
                     if getattr(job, 'recruiter_name', None):
-                        first_name = job.recruiter_name.split()[0]
-                        candidate_name = config.get("personal_info", {}).get("name", "Applicant")
-                        top_skill = job.matched_skills[0] if getattr(job, 'matched_skills', None) else "account management"
-                        follow_up_note = (
-                            f"Hi {first_name}, I recently submitted my application for the {job.title} role at {job.company} via Easy Apply. "
-                            f"With my background in {top_skill} and client success, I would love the chance to connect and introduce myself. Best, {candidate_name}"
-                        )
+                        from src.tracker import build_follow_up_note
+                        follow_up_note = build_follow_up_note(
+                            job.model_dump(), config.get("personal_info", {}).get("name", ""),
+                            getattr(job, 'matched_skills', []) or [], applied=False)
 
                     processed = {
                         "id": job.job_id,
@@ -680,8 +702,16 @@ async def start_applications(
                             "job": job_data,
                             "status": status,
                             "applied_at": datetime.now().isoformat(),
-                            "failure_reason": None if status == "submitted" else (app_result.error_message or "Unknown")
+                            "failure_reason": None if status == "submitted" else (app_result.error_message or "Unknown"),
+                            "answers_given": getattr(app_result, "answers_given", []) or [],
                         }
+                        if status == "submitted":
+                            from src.tracker import build_follow_up_note, ensure_tracking
+                            ensure_tracking(app_record)
+                            if job_data.get("recruiter_name"):
+                                job_data["follow_up_note"] = build_follow_up_note(
+                                    job_data, config.get("personal_info", {}).get("name", ""),
+                                    job_data.get("matched_skills") or [], applied=True)
                         applications_db.setdefault(user_email, []).append(app_record)
                         save_db(applications_db, APPS_FILE)
                         save_db(jobs_db, JOBS_FILE)
@@ -792,6 +822,12 @@ async def debug_info():
 async def get_logs(current_user: dict = Depends(get_current_user)):
     """Get the latest logs for the UI."""
     return {"logs": list(log_buffer)}
+
+# ==================== TRACKER ====================
+# Reply tracking, LinkedIn status sync, follow-ups, digest (backend/tracker_routes.py)
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from tracker_routes import register_tracker_routes  # noqa: E402
+register_tracker_routes(app, globals())
 
 if __name__ == "__main__":
     import uvicorn

@@ -442,3 +442,78 @@ tr:hover td {
     background-position: -200% 0;
   }
 }
+/* ===================== Settings panels (components/SettingsPanels.jsx) ===================== */
+.settings-tabs { display: flex; gap: 0.25rem; flex-wrap: wrap; border-bottom: 1px solid var(--card-border); margin-bottom: 1.5rem; }
+.settings-tab {
+  background: none; border: none; color: var(--text-muted); padding: 0.7rem 1.1rem; font: inherit; font-weight: 600;
+  cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; transition: var(--transition);
+}
+.settings-tab:hover { color: var(--text-main); }
+.settings-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+.section-sub { color: var(--text-muted); font-size: 0.82rem; margin: 0.35rem 0 1rem; line-height: 1.4; }
+
+.settings-grid { display: grid; gap: 0 1.25rem; }
+.settings-grid.two { grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
+.settings-grid.three { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
+.settings-grid.four { grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); }
+.config-section h4 {
+  font-size: 0.78rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
+  margin: 1.75rem 0 0.75rem; padding-top: 1rem; border-top: 1px solid var(--card-border);
+}
+.field-hint { color: var(--text-muted); font-size: 0.76rem; margin-top: 0.35rem; line-height: 1.4; }
+.field-error { color: var(--danger); font-size: 0.85rem; margin: -0.5rem 0 1rem; }
+.muted { color: var(--text-muted); font-size: 0.82rem; }
+.form-group select.unset { color: var(--text-muted); font-style: italic; }
+
+/* chips */
+.chip-box {
+  display: flex; flex-wrap: wrap; gap: 0.4rem; align-items: center; padding: 0.5rem 0.6rem; min-height: 3rem;
+  background: rgba(255, 255, 255, 0.03); border: 1px solid var(--card-border); border-radius: 10px;
+}
+.chip-box:focus-within { border-color: var(--primary); box-shadow: 0 0 0 4px var(--primary-glow); }
+.form-group .chip-box input { flex: 1; min-width: 140px; border: none; background: none; padding: 0.35rem; box-shadow: none; }
+.chip {
+  display: inline-flex; align-items: center; gap: 0.35rem; background: rgba(6, 182, 212, 0.14);
+  border: 1px solid rgba(6, 182, 212, 0.35); color: var(--text-main); padding: 0.25rem 0.35rem 0.25rem 0.7rem;
+  border-radius: 999px; font-size: 0.85rem;
+}
+.chip button { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1rem; line-height: 1; padding: 0 0.25rem; }
+.chip button:hover { color: var(--danger); }
+.chip-suggest { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.5rem; }
+.chip-suggest button {
+  background: none; border: 1px dashed var(--card-border); color: var(--text-muted); border-radius: 999px;
+  padding: 0.2rem 0.65rem; font-size: 0.78rem; cursor: pointer;
+}
+.chip-suggest button:hover { color: var(--primary); border-color: var(--primary); }
+
+/* pill toggles */
+.pill-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.pill {
+  background: rgba(255, 255, 255, 0.03); border: 1px solid var(--card-border); color: var(--text-muted);
+  border-radius: 999px; padding: 0.55rem 1rem; font: inherit; font-size: 0.88rem; cursor: pointer; transition: var(--transition);
+}
+.pill:hover { color: var(--text-main); border-color: rgba(255, 255, 255, 0.2); }
+.pill.on { background: rgba(6, 182, 212, 0.16); border-color: var(--primary); color: var(--text-main); font-weight: 600; }
+
+/* numbers, salary */
+.num-box { position: relative; }
+.num-prefix { position: absolute; left: 1rem; top: 50%; transform: translateY(-50%); color: var(--text-muted); pointer-events: none; }
+.form-group .num-box .num-prefix + input { padding-left: 2rem; }
+.salary-summary {
+  background: rgba(6, 182, 212, 0.07); border: 1px solid rgba(6, 182, 212, 0.25); border-radius: 10px;
+  padding: 0.85rem 1rem; font-size: 0.88rem; line-height: 1.5; margin-bottom: 1rem;
+}
+.check-row { display: flex; align-items: flex-start; gap: 0.6rem; font-size: 0.9rem; margin: 0.6rem 0; cursor: pointer; }
+.check-row input { width: 18px; height: 18px; margin-top: 0.1rem; accent-color: var(--primary); flex-shrink: 0; }
+.check-row em { color: var(--text-muted); font-style: normal; font-size: 0.8rem; }
+.check-row.big { font-weight: 600; font-size: 0.95rem; }
+.screening-head { padding-bottom: 0.5rem; }
+
+/* skill years */
+.skill-rows { display: flex; flex-direction: column; gap: 0.4rem; margin-bottom: 0.6rem; }
+.skill-row { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+.skill-row > span:first-child { min-width: 140px; text-transform: capitalize; }
+.form-group .skill-row input[type="number"] { width: 90px; padding: 0.55rem 0.7rem; }
+.form-group .skill-row.add input:not([type="number"]) { flex: 1; min-width: 160px; padding: 0.55rem 0.8rem; }
+.skill-row button[aria-label^="Remove"] { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 1.1rem; }
+.skill-row button[aria-label^="Remove"]:hover { color: var(--danger); }

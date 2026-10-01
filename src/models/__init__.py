@@ -2,7 +2,7 @@
 Data models for job application agent.
 """
 from enum import Enum
-from typing import Optional, List
+from typing import Dict, Optional, List
 from pydantic import BaseModel, Field
 from datetime import datetime
 
@@ -51,6 +51,8 @@ class GuardStatus(str, Enum):
     SKIP_ASSESSMENT = "skip_assessment"  # Requires assessment
     SKIP_EXTERNAL_ATS = "skip_external_ats"  # Redirects to external ATS
     SKIP_NO_EASY_APPLY = "skip_no_easy_apply"  # No Easy Apply/Quick Apply
+    SKIP_SALARY = "skip_salary"  # Posted pay is below the user's minimum
+    SKIP_EXCLUDED = "skip_excluded"  # Title word or company is on the user's exclude list
     UNKNOWN = "unknown"  # Could not determine
 
 
@@ -90,6 +92,7 @@ class Job(BaseModel):
     recruiter_name: Optional[str] = None
     recruiter_url: Optional[str] = None
     matched_skills: List[str] = Field(default_factory=list)
+    posted_salary: Optional[str] = None  # e.g. '$60,000 - $75,000 /yr' as read from the posting
     
     class Config:
         json_schema_extra = {
@@ -136,6 +139,7 @@ class Application(BaseModel):
     recruiter_name: Optional[str] = None
     recruiter_url: Optional[str] = None
     follow_up_note: Optional[str] = None
+    answers_given: List[Dict[str, str]] = Field(default_factory=list)  # screening answers the bot submitted
     
     class Config:
         json_schema_extra = {
