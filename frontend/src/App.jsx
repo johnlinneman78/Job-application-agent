@@ -1092,7 +1092,14 @@ function ApplicationsPage() {
                       <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>None Listed</span>
                     )}
                   </td>
-                  <td><span className={`status-badge status-${a.status}`}>{a.status}</span></td>
+                  <td>
+                    <span className={`status-badge status-${a.status}`}>{a.status}</span>
+                    {a.failure_reason && (
+                      <div style={{ fontSize: '0.73rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                        {a.failure_reason}
+                      </div>
+                    )}
+                  </td>
                 </tr>
               ))
             )}
