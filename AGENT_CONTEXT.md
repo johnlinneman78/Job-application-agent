@@ -44,26 +44,32 @@
    - `answers_given` is a list of `{question, answer}`.
    - Tracker stages come from `src/tracker.py` `ALL_STAGES`: `applied`, `viewed`, `resume_downloaded`, `replied`, `interview`, `rejected`, `offer`, `withdrawn`, `no_response`.
 11. **Account safety & application limits**: Keep volume to 10-15 applications a day with delays on (John's real account).
-12. **Verification before commit**:
-   - Frontend: `cd frontend && npm run build` must succeed.
-   - Tests: `python -m pytest tests/ -q --ignore=tests/test_unicode_safety.py` must pass (40 tests).
-13. **No autonomous live runs**: Never initiate live application runs without explicit user confirmation.
+12. **Radio answer verification**: Radio answers must be confirmed with `is_checked()` before they're logged. The radio question text comes from `QUESTION_TEXT_JS`, shared with the skip reason. Don't use separate selectors.
+13. **Descriptive skip reasons**: Skip reasons end with `explain()`'s note. Use it to decide if the fix is in Settings (John) or in code (selectors).
+14. **Verification before commit**:
+   - Frontend: `cd frontend && npm run build` must succeed when frontend changes are made.
+   - Tests: `python -m pytest tests/ -q --ignore=tests/test_unicode_safety.py` must pass (49 tests).
+15. **No autonomous live runs**: Never initiate live application runs without explicit user confirmation.
 
 ---
 
 ## 4. Status
-- **Last known GitHub commit**: 7fb6646 (always copy the hash from `git log --oneline -1` after pushing)
+- **Last known GitHub commit**: 53fdd53 (always copy the hash from `git log --oneline -1` after pushing)
 - **Current State**: 
-  - Experience extraction from resume (`src/experience.py`), local-first search with quotas (`build_search_plan()`), exact skip failure reasons, and frontend settings controls for remote scope & resume experience fully integrated and verified (40 tests passing, clean frontend build).
+  - Live-log fixes: 'currently' questions, verified radio selection, skip-reason notes, job locations from cards/top card. Includes the resume one-line-header fix. Verified with 49 passing tests.
 
 ---
 
 ## 5. Next Steps
-- [ ] 1. John: in Settings → Job search, remove "Remote" from Your cities (remote is now its own setting), pick the Remote jobs scope and mix, and set distance to 25 miles.
-- [ ] 2. John: check the "From your resume" box under Screening answers looks right.
-- [ ] 3. Dry run (`dry_run=True`), then a 5-job live run. Then review "Questions that blocked applications" on the Tracker page.
-- [ ] 4. User configuration: Set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` in `.env` for email reply tracking.
-- [ ] 5. Address mobile sideways scroll on Dashboard (`.dashboard-right`) and Queue pages.
+- [ ] 1. John: fill in Settings before the next run:
+  - Settings → Job search: remove "Remote" from Your cities, set Remote jobs to "my state", set Distance to 25 miles.
+  - Settings → Screening answers: Bachelor's degree: No; High school diploma: Yes; Driver's license: Yes/No; Background check: Yes; Drug test: Yes; Require sponsorship: No; Authorized to work: Yes; Comfortable working on-site: Yes; Commute OK: Yes.
+  - Upload the 2026 resume PDF in Settings.
+- [ ] 2. Dry run (answer **n**). Check that `Location:` is filled in with a real location (e.g. "Portland, OR (On-site)") instead of "Unknown", and look for any `SKIP: Outside your area` lines.
+- [ ] 3. Live run of 5 jobs. Every `Auto-answered:` line should be true. Check each one on LinkedIn (My Jobs > Applied).
+- [ ] 4. Read the notes in brackets on each skip reason and send John any "could not select it" cases with the screenshot.
+- [ ] 5. User configuration: Set `GMAIL_ADDRESS` and `GMAIL_APP_PASSWORD` in `.env` for email reply tracking.
+- [ ] 6. Address mobile sideways scroll on Dashboard (`.dashboard-right`) and Queue pages.
 
 ---
 
@@ -71,3 +77,4 @@
 - **2026-09-30**: Applied Tracker page bug fixes to `frontend/src/App.jsx`. Verified frontend build (`npm run build`) and Python test suite (27 tests passed). Established and updated `AGENT_CONTEXT.md` with setup guidelines, complete hard rules, and clean UTF-8 encoding.
 - **2026-09-30**: Fixed scraper location leak: when searching "Remote" (United States), locked work_types strictly to remote-only (f_WT=2) to prevent matching nationwide on-site/hybrid positions.
 - **2026-09-30**: Integrated resume experience parsing (`src/experience.py`) with strict question matching, local-first search planning (`build_search_plan()`) with quotas and out-of-area skip checks, exact skip reason tracking with blocking question stats, and frontend settings controls. Verified 40 passing pytest tests and successful Vite build.
+- **2026-10-01**: Applied live-log fixes: added question filler words ('currently', 'presently', etc.) and 'bd' alias to `src/experience.py`, robust radio option selection with `QUESTION_TEXT_JS` and `is_checked()` confirmation, descriptive `explain()` skip-reason notes, card and job-page location extraction to fix 'Location: Unknown', and one-line resume header support. 49 pytest tests passing.
