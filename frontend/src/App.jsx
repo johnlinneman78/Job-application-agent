@@ -1061,7 +1061,7 @@ function JobQueuePage() {
 // History Page
 function ApplicationsPage() {
   const [apps, setApps] = useState([])
-  useEffect(() => { API.getApplications().then(d => setApps(d.applications || [])).catch(console.error) }, [])
+  useEffect(() => { API.getApplications().then(d => setApps((d.applications || []).map(withRecruiter))).catch(console.error) }, [])
   return (
     <div className="page glass">
       <h1>Execution Logs</h1>
@@ -1132,6 +1132,19 @@ function ApplicationsPage() {
 }
 
 // Tracker Page
+// Application records keep recruiter info inside `job`; expose it at the top level for the UI.
+function withRecruiter(a) {
+  return { ...a, recruiter_name: a.recruiter_name ?? a.job?.recruiter_name, recruiter_url: a.recruiter_url ?? a.job?.recruiter_url,
+           follow_up_note: a.follow_up_note ?? a.job?.follow_up_note }
+}
+
+// answers_given is a list of {question, answer}; older records may hold an object.
+function answerRows(given) {
+  if (Array.isArray(given)) return given.map(x => [x.question, x.answer])
+  if (given && typeof given === 'object') return Object.entries(given)
+  return []
+}
+
 function TrackerPage() {
   const [trackerData, setTrackerData] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -1144,7 +1157,7 @@ function TrackerPage() {
   const loadData = async () => {
     try {
       const data = await API.getTracker()
-      setTrackerData(data)
+      setTrackerData({ ...data, applications: (data.applications || []).map(withRecruiter) })
       const notes = {}
       (data.applications || []).forEach(a => {
         notes[a.id] = a.tracking?.notes || ''
@@ -1256,6 +1269,7 @@ function TrackerPage() {
   if (!trackerData) return <div className="page glass"><p>Could not load tracker data.</p></div>
 
   const { stats, applications = [], follow_ups_due = [], unmatched_emails = [], stages = [], gmail_configured } = trackerData
+  const ov = stats?.overall || {}  // funnel numbers for submitted applications (src/tracker.py compute_stats)
   const dueApps = applications.filter(a => follow_ups_due.includes(a.id))
 
   return (
@@ -1285,7 +1299,7 @@ function TrackerPage() {
 
       {!gmail_configured && (
         <div style={{ background: 'rgba(234, 179, 8, 0.1)', border: '1px solid rgba(234, 179, 8, 0.3)', padding: '0.75rem 1rem', borderRadius: '10px', fontSize: '0.83rem', marginBottom: '1.5rem', color: '#fef08a' }}>
-          💡 <strong>Tip: Gmail IMAP reply detection is not configured.</strong> To automatically scan recruiter replies, interview invites, and rejection notices, copy <code>.env.example</code> to <code>.env</code> and set <code>GMAIL_USER</code> and your 16-character <code>GMAIL_APP_PASSWORD</code>.
+          💡 <strong>Tip: Gmail IMAP reply detection is not configured.</strong> To automatically scan recruiter replies, interview invites, and rejection notices, copy <code>.env.example</code> to <code>.env</code> and set <code>GMAIL_ADDRESS</code> and your 16-character <code>GMAIL_APP_PASSWORD</code>.
         </div>
       )}
 
@@ -1293,28 +1307,28 @@ function TrackerPage() {
       <div className="stats-grid" style={{ marginBottom: '2rem' }}>
         <div className="stat-card">
           <div className="stat-title">Submitted</div>
-          <div className="stat-value">{stats?.total_submitted || 0}</div>
+          <div className="stat-value">{ov.applied || 0}</div>
           <div className="stat-desc">Confirmed applications</div>
         </div>
         <div className="stat-card">
           <div className="stat-title">Viewed Rate</div>
-          <div className="stat-value" style={{ color: 'var(--primary)' }}>{stats?.viewed_rate_pct || 0}%</div>
-          <div className="stat-desc">{stats?.viewed || 0} applications opened</div>
+          <div className="stat-value" style={{ color: 'var(--primary)' }}>{ov.view_rate || 0}%</div>
+          <div className="stat-desc">{ov.viewed || 0} applications opened</div>
         </div>
         <div className="stat-card">
           <div className="stat-title">Reply Rate</div>
-          <div className="stat-value" style={{ color: 'var(--success)' }}>{stats?.reply_rate_pct || 0}%</div>
-          <div className="stat-desc">{stats?.replied || 0} received recruiter response</div>
+          <div className="stat-value" style={{ color: 'var(--success)' }}>{ov.reply_rate || 0}%</div>
+          <div className="stat-desc">{ov.any_reply || 0} received a response</div>
         </div>
         <div className="stat-card">
           <div className="stat-title">Interviews</div>
-          <div className="stat-value" style={{ color: '#ec4899' }}>{stats?.interviews || 0}</div>
+          <div className="stat-value" style={{ color: '#ec4899' }}>{ov.interviews || 0}</div>
           <div className="stat-desc">Phone / technical screenings</div>
         </div>
         <div className="stat-card">
           <div className="stat-title">Submit Rate</div>
-          <div className="stat-value">{stats?.submit_rate_pct || 0}%</div>
-          <div className="stat-desc">{stats?.total_submitted || 0} of {stats?.total_attempted || 0} attempted</div>
+          <div className="stat-value">{stats?.submit_rate || 0}%</div>
+          <div className="stat-desc">{ov.applied || 0} of {stats?.attempts || 0} attempted</div>
         </div>
       </div>
 
@@ -1325,7 +1339,7 @@ function TrackerPage() {
             ⏰ Follow-ups Due ({dueApps.length})
           </h3>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginBottom: '1rem' }}>
-            Recruiters for these positions viewed your profile or have been waiting 24+ hours. Send a quick outreach note to stand out!
+            Recruiters for these positions viewed your application, or it's been 3+ business days with no reply. Send a quick outreach note to stand out!
           </p>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
             {dueApps.map(a => (
@@ -1362,7 +1376,7 @@ function TrackerPage() {
       )}
 
       {/* SKIP REASONS & BY TITLE */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(360px, 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(360px, 100%), 1fr))', gap: '1.5rem', marginBottom: '2rem' }}>
         <div className="config-section">
           <h3>Why Jobs Were Skipped</h3>
           <p style={{ color: 'var(--text-muted)', fontSize: '0.78rem', marginBottom: '1rem' }}>
@@ -1393,7 +1407,7 @@ function TrackerPage() {
                 <div key={title} style={{ display: 'flex', justifyContent: 'space-between', padding: '0.45rem 0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', fontSize: '0.83rem' }}>
                   <span style={{ fontWeight: '500' }}>{title}</span>
                   <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
-                    {st.submitted} submitted · {st.replied} replied
+                    {st.applied} applied · {st.view_rate}% viewed · {st.reply_rate}% replied · {st.interviews} interviews
                   </span>
                 </div>
               ))}
@@ -1445,15 +1459,21 @@ function TrackerPage() {
                           <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)' }}>{a.job?.company} · {a.job?.location}</div>
                         </td>
                         <td>
-                          <select
-                            value={currStage}
-                            onChange={(e) => handleStageChange(a.id, e.target.value)}
-                            style={{ padding: '0.3rem 0.5rem', fontSize: '0.8rem', borderRadius: '6px' }}
-                          >
-                            {stages.map(s => (
-                              <option key={s} value={s}>{s}</option>
-                            ))}
-                          </select>
+                          {a.status === 'submitted' ? (
+                            <select
+                              value={currStage}
+                              onChange={(e) => handleStageChange(a.id, e.target.value)}
+                              style={{ padding: '0.3rem 0.5rem', fontSize: '0.8rem', borderRadius: '6px' }}
+                            >
+                              {stages.map(s => (
+                                <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>
+                              ))}
+                            </select>
+                          ) : (
+                            <span className={`status-badge status-${a.status}`} title={a.failure_reason || ''}>
+                              not applied ({a.status})
+                            </span>
+                          )}
                         </td>
                         <td>
                           {a.recruiter_name ? (
@@ -1510,7 +1530,7 @@ function TrackerPage() {
                       {isExpanded && (
                         <tr>
                           <td colSpan="6" style={{ background: 'rgba(255,255,255,0.02)', padding: '1rem 1.5rem' }}>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: '1.5rem' }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(320px, 100%), 1fr))', gap: '1.5rem' }}>
                               {/* TIMELINE */}
                               <div>
                                 <h4 style={{ fontSize: '0.85rem', marginBottom: '0.5rem', color: 'var(--primary)' }}>
@@ -1535,10 +1555,10 @@ function TrackerPage() {
                                 <h4 style={{ fontSize: '0.85rem', marginBottom: '0.5rem', color: 'var(--success)' }}>
                                   📝 Screening Answers Submitted
                                 </h4>
-                                {a.answers_given && Object.keys(a.answers_given).length > 0 ? (
+                                {answerRows(a.answers_given).length > 0 ? (
                                   <div style={{ display: 'flex', flexDirection: 'column', gap: '0.35rem' }}>
-                                    {Object.entries(a.answers_given).map(([q, ans]) => (
-                                      <div key={q} style={{ fontSize: '0.78rem', background: 'rgba(255,255,255,0.03)', padding: '0.45rem 0.75rem', borderRadius: '6px' }}>
+                                    {answerRows(a.answers_given).map(([q, ans], i) => (
+                                      <div key={i} style={{ fontSize: '0.78rem', background: 'rgba(255,255,255,0.03)', padding: '0.45rem 0.75rem', borderRadius: '6px' }}>
                                         <div style={{ color: 'var(--text-muted)' }}>Q: {q}</div>
                                         <div style={{ fontWeight: '600', color: 'var(--text-main)', marginTop: '0.1rem' }}>Answer: {String(ans)}</div>
                                       </div>
