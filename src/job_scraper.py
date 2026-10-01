@@ -94,8 +94,15 @@ class JobScraper:
             page = await self.context.new_page()
             should_close_page = True
         
+        MAX_DISCOVERY_LIMIT = 35
+
         for title in titles:
+            if len(jobs) >= MAX_DISCOVERY_LIMIT:
+                logger.info(f"Reached discovery target of {MAX_DISCOVERY_LIMIT} jobs. Stopping scan.")
+                break
             for location in locations:
+                if len(jobs) >= MAX_DISCOVERY_LIMIT:
+                    break
                 try:
                     # Build LinkedIn search URL
                     search_url = self._build_linkedin_search_url(title, location, days_ago)
@@ -145,16 +152,20 @@ class JobScraper:
                                 has_easy_apply=False,  # verified later by the guard
                                 posted_date=datetime.now(),
                             ))
-                            if len(seen_ids) >= 25:
+                            if len(seen_ids) >= 25 or len(jobs) >= MAX_DISCOVERY_LIMIT:
                                 break
-                        logger.info(f"Fallback link scan found {len(seen_ids)} jobs")
+                        logger.info(f"Fallback link scan found {len(seen_ids)} jobs (total: {len(jobs)})")
+                        if len(jobs) >= MAX_DISCOVERY_LIMIT:
+                            break
                         if not seen_ids:
                             Path("data").mkdir(exist_ok=True)
                             await page.screenshot(path=f"data/search_zero_results_{int(datetime.now().timestamp())}.png")
                         continue
                     
-                    # Limit to first 25 per search
+                    # Limit to first 25 per search or until limit reached
                     for i in range(min(count, 25)):
+                        if len(jobs) >= MAX_DISCOVERY_LIMIT:
+                            break
                         try:
                             card = job_cards.nth(i)
                             
