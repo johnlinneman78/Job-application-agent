@@ -476,6 +476,17 @@ async def trigger_job_search(
                         except Exception as e:
                             logger.warning(f"Could not score job {job.title}: {e}")
 
+                    # Generate personalized follow-up note template if recruiter is found (LinkedHelper tip)
+                    follow_up_note = ""
+                    if getattr(job, 'recruiter_name', None):
+                        first_name = job.recruiter_name.split()[0]
+                        candidate_name = config.get("personal_info", {}).get("name", "Applicant")
+                        top_skill = job.matched_skills[0] if getattr(job, 'matched_skills', None) else "account management"
+                        follow_up_note = (
+                            f"Hi {first_name}, I recently submitted my application for the {job.title} role at {job.company} via Easy Apply. "
+                            f"With my background in {top_skill} and client success, I would love the chance to connect and introduce myself. Best, {candidate_name}"
+                        )
+
                     processed = {
                         "id": job.job_id,
                         "title": job.title,
@@ -484,6 +495,10 @@ async def trigger_job_search(
                         "url": job.url,
                         "platform": job.platform.value if hasattr(job.platform, 'value') else str(job.platform),
                         "match_score": job.match_score,
+                        "recruiter_name": getattr(job, 'recruiter_name', None),
+                        "recruiter_url": getattr(job, 'recruiter_url', None),
+                        "matched_skills": getattr(job, 'matched_skills', []),
+                        "follow_up_note": follow_up_note,
                         "status": "queued",
                         "discovered_at": datetime.now().isoformat()
                     }

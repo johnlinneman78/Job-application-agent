@@ -945,13 +945,87 @@ function JobQueuePage() {
       ) : (
         <div className="table-container" style={{ marginTop: '1rem' }}>
           <table>
-            <thead><tr><th>Job Title</th><th>Company</th><th>Score</th><th>Status</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Job Title</th>
+                <th>Company</th>
+                <th>Fit</th>
+                <th>Matched Skills</th>
+                <th>Hiring Contact & Follow-up</th>
+                <th>Status</th>
+              </tr>
+            </thead>
             <tbody>
               {jobs.map(j => (
                 <tr key={j.id}>
-                  <td style={{ fontWeight: '500' }}>{j.title}</td>
+                  <td style={{ fontWeight: '500' }}>
+                    <a href={j.url} target="_blank" rel="noreferrer" style={{ color: 'var(--text-main)', textDecoration: 'none' }}>
+                      {j.title} ↗
+                    </a>
+                  </td>
                   <td style={{ color: 'var(--text-muted)' }}>{j.company}</td>
-                  <td><span style={{ color: 'var(--primary)', fontWeight: '600' }}>{(j.match_score * 100).toFixed(0)}%</span></td>
+                  <td>
+                    <span style={{
+                      color: j.match_score >= 0.7 ? 'var(--success)' : (j.match_score >= 0.4 ? 'var(--primary)' : 'var(--warning)'),
+                      fontWeight: '700'
+                    }}>
+                      {(j.match_score * 100).toFixed(0)}%
+                    </span>
+                  </td>
+                  <td>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.25rem', maxWidth: '220px' }}>
+                      {j.matched_skills && j.matched_skills.length > 0 ? (
+                        j.matched_skills.slice(0, 3).map(s => (
+                          <span key={s} style={{
+                            display: 'inline-block',
+                            padding: '0.15rem 0.45rem',
+                            fontSize: '0.72rem',
+                            borderRadius: '4px',
+                            background: 'rgba(6, 182, 212, 0.12)',
+                            color: 'var(--primary)',
+                            border: '1px solid rgba(6, 182, 212, 0.25)'
+                          }}>
+                            {s}
+                          </span>
+                        ))
+                      ) : (
+                        <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>Role Alignment</span>
+                      )}
+                    </div>
+                  </td>
+                  <td>
+                    {j.recruiter_name ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        {j.recruiter_url ? (
+                          <a href={j.recruiter_url} target="_blank" rel="noreferrer" style={{ fontSize: '0.82rem', color: 'var(--primary)', textDecoration: 'underline' }}>
+                            👤 {j.recruiter_name}
+                          </a>
+                        ) : (
+                          <span style={{ fontSize: '0.82rem', color: 'var(--text-main)' }}>👤 {j.recruiter_name}</span>
+                        )}
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(j.follow_up_note || '');
+                            alert(`Copied personalized follow-up note for ${j.recruiter_name} to clipboard!`);
+                          }}
+                          title="Copy personalized recruiter outreach message (LinkedHelper tip)"
+                          style={{
+                            background: 'rgba(255, 255, 255, 0.08)',
+                            color: 'var(--text-main)',
+                            border: '1px solid rgba(255, 255, 255, 0.15)',
+                            padding: '0.2rem 0.45rem',
+                            borderRadius: '4px',
+                            fontSize: '0.72rem',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          📋 Copy Pitch
+                        </button>
+                      </div>
+                    ) : (
+                      <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>Direct Easy Apply</span>
+                    )}
+                  </td>
                   <td><span className={`status-badge status-${j.status}`}>{j.status}</span></td>
                 </tr>
               ))}
@@ -972,16 +1046,52 @@ function ApplicationsPage() {
       <h1>Execution Logs</h1>
       <div className="table-container" style={{ marginTop: '2rem' }}>
         <table>
-          <thead><tr><th>Timestamp</th><th>Job</th><th>Company</th><th>Outcome</th></tr></thead>
+          <thead><tr><th>Timestamp</th><th>Job</th><th>Company</th><th>Recruiter Follow-up</th><th>Outcome</th></tr></thead>
           <tbody>
             {apps.length === 0 ? (
-              <tr><td colSpan="4" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '2rem' }}>No application submissions logged yet.</td></tr>
+              <tr><td colSpan="5" style={{ textAlign: 'center', color: 'var(--text-muted)', padding: '2rem' }}>No application submissions logged yet.</td></tr>
             ) : (
               apps.map(a => (
                 <tr key={a.id}>
-                  <td style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>{new Date(a.applied_at).toLocaleString()}</td>
-                  <td>{a.job.title}</td>
+                  <td style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>{new Date(a.applied_at || a.timestamp).toLocaleString()}</td>
+                  <td>
+                    <a href={a.job.url} target="_blank" rel="noreferrer" style={{ color: 'var(--text-main)', textDecoration: 'none' }}>
+                      {a.job.title} ↗
+                    </a>
+                  </td>
                   <td>{a.job.company}</td>
+                  <td>
+                    {a.recruiter_name ? (
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                        {a.recruiter_url ? (
+                          <a href={a.recruiter_url} target="_blank" rel="noreferrer" style={{ fontSize: '0.82rem', color: 'var(--primary)', textDecoration: 'underline' }}>
+                            👤 {a.recruiter_name}
+                          </a>
+                        ) : (
+                          <span style={{ fontSize: '0.82rem' }}>👤 {a.recruiter_name}</span>
+                        )}
+                        <button
+                          onClick={() => {
+                            navigator.clipboard.writeText(a.follow_up_note || '');
+                            alert(`Copied recruiter follow-up message to clipboard!`);
+                          }}
+                          style={{
+                            background: 'rgba(255, 255, 255, 0.08)',
+                            color: 'var(--text-main)',
+                            border: '1px solid rgba(255, 255, 255, 0.15)',
+                            padding: '0.2rem 0.45rem',
+                            borderRadius: '4px',
+                            fontSize: '0.72rem',
+                            cursor: 'pointer'
+                          }}
+                        >
+                          📋 Copy Pitch
+                        </button>
+                      </div>
+                    ) : (
+                      <span style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>None Listed</span>
+                    )}
+                  </td>
                   <td><span className={`status-badge status-${a.status}`}>{a.status}</span></td>
                 </tr>
               ))

@@ -87,6 +87,9 @@ class Job(BaseModel):
     skill_match: float = 0.0
     title_match: float = 0.0
     location_match: float = 0.0
+    recruiter_name: Optional[str] = None
+    recruiter_url: Optional[str] = None
+    matched_skills: List[str] = Field(default_factory=list)
     
     class Config:
         json_schema_extra = {
@@ -130,6 +133,9 @@ class Application(BaseModel):
     error_message: Optional[str] = None
     screenshot_path: Optional[str] = None
     confirmation_id: Optional[str] = None
+    recruiter_name: Optional[str] = None
+    recruiter_url: Optional[str] = None
+    follow_up_note: Optional[str] = None
     
     class Config:
         json_schema_extra = {

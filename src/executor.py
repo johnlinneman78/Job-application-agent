@@ -204,6 +204,8 @@ class ApplicationExecutor:
                         continue
 
                     old_fp = await self._get_modal_fingerprint(modal)
+                    if btn_type == "SUBMIT":
+                        await self._uncheck_follow_company_if_present(modal)
                     await self._click_robustly(btn)
                     buttons_clicked.append(btn_type)
                     await self.page.wait_for_timeout(2000)
@@ -321,6 +323,18 @@ class ApplicationExecutor:
 
     # ------------------------------------------------------ step inspection
 
+    async def _uncheck_follow_company_if_present(self, modal: Locator):
+        """Uncheck 'Follow company' on the final review step to prevent feed clutter (LinkedHelper tip)."""
+        try:
+            follow_cb = modal.locator('input#follow-company-checkbox, input[id*="follow-company"], input[name*="followCompany"]')
+            for i in range(await follow_cb.count()):
+                cb = follow_cb.nth(i)
+                if await cb.is_visible() and await cb.is_checked():
+                    await cb.uncheck(force=True)
+                    logger.info("  Unchecked 'Follow company' to keep your feed clean.")
+        except Exception as e:
+            logger.debug(f"Could not uncheck follow company: {e}")
+
     async def _field_label(self, modal: Locator, field: Locator) -> str:
         """Best-effort human label for an input/select/textarea."""
         parts = []
@@ -436,6 +450,17 @@ class ApplicationExecutor:
         if not fallback_path or not Path(fallback_path).is_file():
             logger.info("  No local resume file provided; proceeding with LinkedIn profile defaults.")
             return True
+
+        # LinkedHelper best practice: LinkedIn Easy Apply fails for resumes over 2 MB
+        try:
+            file_size_mb = Path(fallback_path).stat().st_size / (1024 * 1024)
+            if file_size_mb > 2.0:
+                logger.warning(
+                    f"  [WARNING] Resume file size is {file_size_mb:.2f} MB. "
+                    "LinkedIn Easy Apply often rejects uploads > 2.0 MB. Please optimize/compress data/resume.pdf."
+                )
+        except Exception:
+            pass
         try:
             await file_inputs.first.set_input_files(str(Path(fallback_path).absolute()))
             await self.page.wait_for_timeout(3000)

@@ -473,6 +473,22 @@ class GuardedJobScraper(JobScraper):
                                 job.description = (await desc_el.inner_text()).strip()
                         except Exception as e:
                             logger.debug(f"Could not fetch job description: {e}")
+                        # Extract Hiring Team / Recruiter info (LinkedHelper best practice for direct follow-up)
+                        try:
+                            hirer = page.locator('.hirer-card__hirer-information, .jobs-poster, [class*="hirer-card"], .message-the-recruiter').first
+                            if await hirer.count():
+                                name_el = hirer.locator('a[href*="/in/"], strong, .jobs-poster__name, h3').first
+                                if await name_el.count():
+                                    r_name = (await name_el.inner_text()).strip().split('\n')[0]
+                                    if r_name and len(r_name) < 50:
+                                        job.recruiter_name = r_name
+                                    r_link = await name_el.get_attribute('href')
+                                    if r_link:
+                                        job.recruiter_url = r_link.split('?')[0]
+                                        logger.info(f"  Found recruiter: {job.recruiter_name} ({job.recruiter_url})")
+                        except Exception as e:
+                            logger.debug(f"Could not extract recruiter info: {e}")
+
                         safe_jobs.append(job)
                         logger.info(f"SAFE: {job.title} at {job.company}")
                         if on_job_found:

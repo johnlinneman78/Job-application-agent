@@ -99,6 +99,8 @@ class JobRanker:
         job.location_match = location_score / 0.10
 
         job.match_score = round(total_score, 3)
+        matched = [s.title() for s in self.resume_skills_set.intersection(job_skills) if s]
+        job.matched_skills = sorted(matched)
 
         
 
