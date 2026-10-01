@@ -124,7 +124,7 @@ class JobApplicationAgent:
             days_ago=days_ago
         )
         
-        self.jobs_ranked = JobRanker(self.resume).rank_jobs(
+        self.jobs_ranked = JobRanker(self.resume, search_config.get("locations") or []).rank_jobs(
             self.jobs_discovered, 
             limit=search_config.get("max_applications", 50)
         )
@@ -186,7 +186,7 @@ class JobApplicationAgent:
                 return
 
             # Step 3: Rank based on discovery data (Title/Company/Location)
-            ranker = JobRanker(self.resume)
+            ranker = JobRanker(self.resume, self.config.get("search", {}).get("locations") or [])
             self.jobs_ranked = ranker.rank_jobs(all_discovered_jobs, limit=100) # Pre-rank top 100
             
             # Step 4: Perform Guard Checks on ONLY the top matches to save time

@@ -43,15 +43,12 @@ class JobRanker:
 
     
 
-    def __init__(self, resume: Resume):
-
+    def __init__(self, resume: Resume, locations: List[str] = None):
+        from src.locations import home_states
         self.resume = resume
-
         self.resume_skills_set = set([s.lower() for s in resume.technical_skills])
-
         self.resume_titles_set = set([t.lower() for t in resume.job_titles])
-
-    
+        self.home_states = home_states(locations or [])
 
     def score_job(self, job: Job) -> float:
 
@@ -324,50 +321,16 @@ class JobRanker:
     
 
     def _score_location_match(self, job_location: str) -> float:
-
-        """
-
-        Score location match.
-
-        
-
-        Returns:
-
-            0.0 to 1.0
-
-        """
-
-        job_location_lower = job_location.lower()
-
-        
-
-        # Perfect matches
-
-        if "remote" in job_location_lower:
-
+        """Jobs in the user's own states score highest, then remote, then elsewhere."""
+        from src.locations import states_in, workplace_type
+        loc = job_location or ""
+        if self.home_states and states_in(loc) & self.home_states:
             return 1.0
-
-        
-
-        # Check against user's preferred locations (from config)
-
-        # For now, simple heuristic
-
-        preferred_locations = ["portland", "oregon", "remote"]
-
-        
-
-        for location in preferred_locations:
-
-            if location in job_location_lower:
-
-                return 0.9
-
-        
-
-        return 0.5  # Neutral for other locations
-
-    
+        if workplace_type(loc) == "remote" or "remote" in loc.lower():
+            return 0.85 if self.home_states else 1.0
+        if not self.home_states:
+            return 0.5
+        return 0.3 if states_in(loc) else 0.5   # known other state vs. unknown
 
     def _score_application_friction(self, job: Job) -> float:
 

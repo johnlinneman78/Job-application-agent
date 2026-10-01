@@ -348,7 +348,7 @@ class ResumeAnalyzer:
                 if clean:
                     return [clean]
 
-        return ["Western Governors University"]
+        return []
 
     def generate_role_fit_matrix(self, resume: Resume) -> Dict[str, float]:
         """

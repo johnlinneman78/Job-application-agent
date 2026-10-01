@@ -489,8 +489,13 @@ def compute_stats(records: List[dict]) -> dict:
         by_title[_title_bucket((r.get("job") or {}).get("title", ""))].append(r)
 
     skip_reasons = defaultdict(int)
+    blocking = defaultdict(int)
     for r in skipped:
-        skip_reasons[(r.get("failure_reason") or "Unknown").split(":")[0]] += 1
+        reason = r.get("failure_reason") or "Unknown"
+        skip_reasons[reason.split(":")[0]] += 1
+        m = re.search(r"'(.+?)'\s*$", reason)          # "...: Question field: 'how many years of ...'"
+        if m and m.group(1) not in ("unlabeled", ""):
+            blocking[m.group(1).strip().lower()] += 1
 
     attempts = len(submitted) + len(skipped)
     return {
@@ -499,6 +504,8 @@ def compute_stats(records: List[dict]) -> dict:
         "attempts": attempts,
         "submit_rate": round(100 * len(submitted) / attempts, 1) if attempts else 0.0,
         "skip_reasons": dict(sorted(skip_reasons.items(), key=lambda kv: -kv[1])),
+        # the exact screening questions that blocked applications, most common first
+        "blocking_questions": dict(sorted(blocking.items(), key=lambda kv: -kv[1])[:25]),
     }
 
 

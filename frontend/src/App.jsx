@@ -1394,6 +1394,22 @@ function TrackerPage() {
           ) : (
             <p className="muted">No jobs skipped yet.</p>
           )}
+          {stats?.blocking_questions && Object.keys(stats.blocking_questions).length > 0 && (
+            <div style={{ marginTop: '1.25rem' }}>
+              <h4 style={{ fontSize: '0.8rem', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--text-muted)', marginBottom: '0.5rem' }}>
+                Questions that blocked applications
+              </h4>
+              <p className="muted" style={{ marginBottom: '0.5rem' }}>Answer these in Settings → Screening answers to get more jobs through.</p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.4rem' }}>
+                {Object.entries(stats.blocking_questions).map(([q, count]) => (
+                  <div key={q} style={{ display: 'flex', justifyContent: 'space-between', gap: '1rem', padding: '0.4rem 0.75rem', background: 'rgba(255,255,255,0.02)', borderRadius: '6px', fontSize: '0.8rem' }}>
+                    <span>{q}</span>
+                    <span style={{ fontWeight: '600', color: 'var(--text-muted)' }}>{count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="config-section">

@@ -131,8 +131,8 @@ def test_parse_linkedin_status():
 def test_note_is_short_and_honest():
     job = {"title": "Regional Strategic Enterprise Healthcare Technology Account Executive II",
            "company": "International Business Machines Corporation", "recruiter_name": "Alexandra Smith"}
-    applied = T.build_follow_up_note(job, "John Linneman", ["account management"], applied=True)
-    queued = T.build_follow_up_note(job, "John Linneman", ["account management"], applied=False)
+    applied = T.build_follow_up_note(job, "Jordan Sample", ["account management"], applied=True)
+    queued = T.build_follow_up_note(job, "Jordan Sample", ["account management"], applied=False)
     assert len(applied) <= 200 and len(queued) <= 200
     assert "applied" in applied and "applied" not in queued
 

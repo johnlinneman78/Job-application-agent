@@ -39,6 +39,7 @@ from typing import Dict, List, Optional, Tuple
 from playwright.async_api import Locator
 
 from src import salary as salary_mod
+from src import experience as exp_mod
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +108,44 @@ class ScreeningAnswerer:
             if key not in self.answers and personal.get(key):
                 self.answers[key] = personal.get(key)
         self.given: List[Dict[str, str]] = []   # audit log for the current application
+        # Resume-derived experience (src/experience.py). Loaded once per resume file.
+        self.profile = None
+        self._profile_path = None
+        # "answer": when the resume shows no experience in a recognised area, answer 0 / No (honest)
+        # "skip":   skip the job instead
+        self.no_experience_mode = str(answers.get("no_experience_answer") or "answer").lower()
+        self.use_resume = str(answers.get("use_resume_experience", "true")).lower() not in ("false", "0", "no")
 
     def reset(self):
         self.given = []
+
+    def load_resume(self, resume_path: Optional[str] = None, resume_text: Optional[str] = None):
+        """Build the experience profile from the resume (PDF path or plain text)."""
+        if not self.use_resume:
+            return
+        if resume_text is not None:
+            self.profile = exp_mod.build_profile(resume_text)
+            return
+        from pathlib import Path
+        path = resume_path if resume_path and Path(resume_path).is_file() else None
+        if not path and Path("data/resume.pdf").is_file():
+            path = "data/resume.pdf"
+        if not path or path == self._profile_path:
+            return
+        try:
+            from src.resume_analyzer import ResumeAnalyzer
+            text = ResumeAnalyzer()._extract_text_from_pdf(path)
+            self.profile = exp_mod.build_profile(text)
+            self._profile_path = path
+            logger.info(f"  Experience from resume: {self.profile.as_dict()['areas']} tools={self.profile.as_dict()['tools']}")
+        except Exception as e:
+            logger.warning(f"Could not read resume for experience: {e}")
+
+    def _zero(self, kind: str) -> Optional[str]:
+        """Answer for a recognised area/tool the resume shows no experience in."""
+        if self.no_experience_mode == "skip":
+            return None
+        return "0" if kind == "years" else "No"
 
     # ------------------------------------------------------------ decision
 
@@ -122,14 +158,25 @@ class ScreeningAnswerer:
         if "years" in q and ("experience" in q or "years of" in q):
             return self._years_answer(q)
 
-        # "Do you have experience with Salesforce?" -> Yes only if listed in skill_years
-        m = re.search(r"(do you have|have you (had|got)?|any)\s.{0,25}experience (with|in|using|working with) (.+?)\??$", q)
+        # "Do you have experience with Salesforce?" / "...in customer service?"
+        m = re.search(r"(do you have|have you (had|got)?|any)\s.{0,25}experience (with|in|using|working with|working in) (.+?)\??$", q)
         if m:
             subject = m.group(4)
+            # 1) manual entries in Settings
             for skill, yrs in self.skill_years.items():
                 if re.search(r"(?<![a-z0-9])" + re.escape(skill) + r"(?![a-z0-9])", subject):
                     n = _clean(yrs)
-                    return "Yes" if n and re.sub(r"[^\d.]", "", n) and float(re.sub(r"[^\d.]", "", n)) > 0 else None
+                    return "Yes" if n and re.sub(r"[^\d.]", "", n) and float(re.sub(r"[^\d.]", "", n)) > 0 else self._zero("yesno")
+            # 2) the resume
+            if self.profile:
+                tool = exp_mod.tool_for_question(subject)
+                if tool:
+                    if tool in self.profile.tools or tool in self.profile.skills_only:
+                        return "Yes"
+                    return self._zero("yesno")
+                area = exp_mod.area_for_question(subject)
+                if area:
+                    return "Yes" if self.profile.areas.get(area, 0) > 0 else self._zero("yesno")
             if any(w in subject for w in SALES_WORDS) and _clean(self.answers.get("sales_experience")):
                 return "Yes"
             return None
@@ -142,16 +189,35 @@ class ScreeningAnswerer:
         return None
 
     def _years_answer(self, q: str) -> Optional[str]:
-        # specific tool / skill first ("years of experience with Salesforce")
+        # 1) manual skill / tool entries in Settings always win
         for skill, yrs in self.skill_years.items():
             if re.search(r"(?<![a-z0-9])" + re.escape(skill) + r"(?![a-z0-9])", q):
                 return _clean(yrs)
-        if any(w in q for w in SALES_WORDS):
-            return _clean(self.answers.get("sales_experience"))
-        # generic "years of (work / professional) experience" only - not "years of Python"
+        # 2) a specific tool ("years of experience with Salesforce")
+        tool = exp_mod.tool_for_question(q)
+        if tool:
+            if self.profile and tool in self.profile.tools:
+                return str(self.profile.tools[tool])
+            if self.profile and tool in self.profile.skills_only:
+                return None            # listed on resume but no dated role: years unknown -> skip
+            return self._zero("years") if self.profile else None
+        # 3) an experience area ("years of customer service experience")
+        area = exp_mod.area_for_question(q)
+        if area in ("sales", "account management", "b2b sales") and _clean(self.answers.get("sales_experience")):
+            return _clean(self.answers.get("sales_experience"))     # manual sales years
+        if area:
+            if self.profile:
+                yrs = self.profile.areas.get(area, 0)
+                return str(yrs) if yrs > 0 else self._zero("years")
+            return None
+        # 4) generic "years of (work / professional) experience" only - not "years of Python"
         if re.search(r"years of (total |overall |professional |relevant |work |full[- ]time )?(work )?experience\??\s*$", q) \
                 or re.search(r"how many years of (total |overall |professional |work )?experience do you have\??\s*$", q):
-            return _clean(self.answers.get("years_experience"))
+            manual = _clean(self.answers.get("years_experience"))
+            if manual:
+                return manual
+            if self.profile and self.profile.total_years:
+                return str(self.profile.total_years)
         return None
 
     # ------------------------------------------------------------ filling

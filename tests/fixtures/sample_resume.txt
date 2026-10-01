@@ -1,0 +1,39 @@
+JOHN SAMPLE
+Anytown, OR | jsample@example.com | 555-555-0100
+CORE SKILLS
+Salesforce, HubSpot, CRM, Microsoft Excel, Zendesk, consultative sales, account management
+PROFESSIONAL EXPERIENCE
+Financial Advisor Trainee
+Northwind Financial
+Mar 2026 – Jun 2026
+- Built client pipeline, prospecting and needs analysis for insurance and investment products
+Inside Sales Representative – Federal Government IT/VAR Sales
+Contoso Federal
+May 2025 – Aug 2025
+- Prospected federal accounts, managed pipeline in Salesforce, quoted hardware
+Brand Advocate
+Fabrikam Retail
+Aug 2024 – Jan 2025
+- Retail customer engagement and product demos; met weekly sales targets
+Account Manager
+Tailspin Wireless
+Oct 2023 – Feb 2024
+- Managed B2B accounts, renewals and upsell; tracked in HubSpot CRM
+Datacenter Technician
+Adatum Services
+Sep 2023 – Dec 2023
+- Rack installs, hardware troubleshooting, ticketing in ServiceNow
+IT Support Technician
+Litware IT Services
+Apr 2023 – Aug 2023
+- Help desk and desktop support for 500+ users; Windows imaging; customer service to employees
+Healthcare IT Account Manager
+Proseware Inc
+Aug 2019 – Jul 2021
+- Managed healthcare client accounts, quoting and order support; Salesforce CRM; customer support escalations
+Web Content Writer
+Wingtip News
+Jun 2015 – Jan 2017
+- Wrote articles and content
+EDUCATION
+State University, B.S. Business Management, 2025 - 2028 (expected)

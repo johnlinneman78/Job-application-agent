@@ -79,6 +79,43 @@ class JobScraper:
         logger.info(f"Discovered {len(all_jobs)} unique jobs")
         return all_jobs
     
+    def build_search_plan(self, titles: List[str], locations: List[str]) -> List[dict]:
+        """
+        One entry per LinkedIn search, local searches first:
+          local  = each city in Settings, on-site/hybrid only (+ distance)
+          remote = remote-only search, either in the user's state(s) or anywhere in the US
+        """
+        from src.locations import is_remote_location, home_states, STATES
+
+        search = self.config.get("search", {}) or {}
+        selected = {w.lower() for w in (search.get("work_types") or [])}
+        any_type = not selected
+        local_types = sorted((selected & {"onsite", "hybrid"}) if not any_type else {"onsite", "hybrid"})
+        remote_on = any_type or "remote" in selected or any(is_remote_location(l) for l in locations)
+        remote_scope = (search.get("remote_scope") or "state").lower()   # "state" | "us" | "off"
+        states = sorted(home_states(locations))
+
+        plan = []
+        for title in titles:
+            for loc in locations:
+                if is_remote_location(loc):
+                    continue
+                if local_types:
+                    plan.append({"title": title, "location": loc, "work_types": local_types, "group": "local"})
+        if remote_on and remote_scope != "off":
+            remote_locs = [f"{STATES[s]}, United States" for s in states] if (remote_scope == "state" and states) else ["United States"]
+            for title in titles:
+                for rl in remote_locs:
+                    plan.append({"title": title, "location": rl, "work_types": ["remote"], "group": "remote"})
+        # de-duplicate, keep order
+        seen, out = set(), []
+        for p in plan:
+            key = (p["title"].lower(), p["location"].lower(), tuple(p["work_types"]))
+            if key not in seen:
+                seen.add(key)
+                out.append(p)
+        return out
+
     async def _scrape_linkedin(
         self,
         titles: List[str],
@@ -86,141 +123,184 @@ class JobScraper:
         days_ago: int,
         page: Page = None
     ) -> List[Job]:
-        """Scrape LinkedIn jobs."""
+        """
+        Run the search plan with fair quotas:
+        - total cap = search.max_discovered (default 40)
+        - local vs remote split = search.local_share percent (default 70% local)
+        - each search contributes its share first, leftovers fill any empty slots after
+        so one search can no longer use up the whole cap.
+        """
+        import math
         logger.info("Scraping LinkedIn...")
-        jobs = []
-        
         should_close_page = False
         if not page:
             page = await self.context.new_page()
             should_close_page = True
-        
-        MAX_DISCOVERY_LIMIT = 35
 
-        for title in titles:
-            if len(jobs) >= MAX_DISCOVERY_LIMIT:
-                logger.info(f"Reached discovery target of {MAX_DISCOVERY_LIMIT} jobs. Stopping scan.")
-                break
-            for location in locations:
-                if len(jobs) >= MAX_DISCOVERY_LIMIT:
+        search = self.config.get("search", {}) or {}
+        cap = int(search.get("max_discovered") or 40)
+        local_share = max(0, min(100, int(search.get("local_share", 70))))
+        plan = self.build_search_plan(titles, locations)
+        groups = {g: [p for p in plan if p["group"] == g] for g in ("local", "remote")}
+        if groups["local"] and groups["remote"]:
+            quota = {"local": round(cap * local_share / 100), "remote": cap - round(cap * local_share / 100)}
+        else:
+            quota = {"local": cap if groups["local"] else 0, "remote": cap if groups["remote"] else 0}
+        logger.info(f"Search plan: {len(groups['local'])} local + {len(groups['remote'])} remote searches, "
+                    f"quota local={quota['local']} remote={quota['remote']}")
+
+        seen_ids = set()
+        picked = {"local": [], "remote": []}
+        leftovers = {"local": [], "remote": []}
+        for g in ("local", "remote"):
+            if not groups[g] or quota[g] <= 0:
+                continue
+            per_search = max(3, math.ceil(quota[g] / len(groups[g])))
+            for p in groups[g]:
+                if len(picked[g]) >= quota[g]:
                     break
-                try:
-                    # Build LinkedIn search URL
-                    search_url = self._build_linkedin_search_url(title, location, days_ago)
-                    await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
-                    await page.wait_for_timeout(4000)
-                    
-                    # Scroll the results list a few times so lazy-loaded cards render
-                    for _ in range(6):
-                        try:
-                            await page.evaluate("""() => {
-                                const list = document.querySelector('.jobs-search-results-list, .jobs-search-results__list, .scaffold-layout__list > div, .scaffold-layout__list');
-                                if (list) { list.scrollTop = list.scrollHeight; } else { window.scrollBy(0, 1500); }
-                            }""")
-                        except Exception:
-                            pass
-                        await page.wait_for_timeout(800)
+                url = self._build_linkedin_search_url(p["title"], p["location"], days_ago, work_types=p["work_types"])
+                found = await self._scrape_one_search(page, url, p["title"], p["location"])
+                fresh = [j for j in found if j.job_id not in seen_ids]
+                for j in fresh:
+                    j.search_group = g
+                take = fresh[:min(per_search, quota[g] - len(picked[g]))]
+                for j in take:
+                    seen_ids.add(j.job_id)
+                picked[g].extend(take)
+                leftovers[g].extend(fresh[len(take):])
+            # fill this group's empty slots from its own leftovers
+            for j in leftovers[g]:
+                if len(picked[g]) >= quota[g]:
+                    break
+                if j.job_id not in seen_ids:
+                    seen_ids.add(j.job_id)
+                    picked[g].append(j)
+        # any slots still empty: borrow from the other group's leftovers
+        jobs = picked["local"] + picked["remote"]
+        for g in ("local", "remote"):
+            for j in leftovers[g]:
+                if len(jobs) >= cap:
+                    break
+                if j.job_id not in seen_ids:
+                    seen_ids.add(j.job_id)
+                    jobs.append(j)
 
-                    # Extract job listings - support both logged-out and logged-in selectors
-                    job_cards = page.locator('div.job-search-card, li.jobs-search-results__list-item, div.job-card-container')
-                    count = await job_cards.count()
-                    
-                    logger.info(f"Found {count} LinkedIn jobs for '{title}' in '{location}'")
-
-                    if count == 0:
-                        # LinkedIn renamed its CSS classes: fall back to job links,
-                        # which always look like /jobs/view/<id>/. Title/company are
-                        # filled in later by the guard step from the job page itself.
-                        links = await page.eval_on_selector_all(
-                            'a[href*="/jobs/view/"]',
-                            "els => els.map(e => ({href: e.href, text: (e.innerText || '').trim()}))"
-                        )
-                        seen_ids = set()
-                        for item in links:
-                            href = item.get("href") or ""
-                            jid = self._extract_linkedin_job_id(href)
-                            if not jid or not jid.isdigit() or jid in seen_ids:
-                                continue
-                            seen_ids.add(jid)
-                            jobs.append(Job(
-                                job_id=f"linkedin_{jid}",
-                                platform=Platform.LINKEDIN,
-                                title=(item.get("text") or "Unknown").split("\n")[0][:120] or "Unknown",
-                                company="Unknown",
-                                location="Unknown",
-                                url=f"https://www.linkedin.com/jobs/view/{jid}/",
-                                guard_status=GuardStatus.UNKNOWN,
-                                has_easy_apply=False,  # verified later by the guard
-                                posted_date=datetime.now(),
-                            ))
-                            if len(seen_ids) >= 25 or len(jobs) >= MAX_DISCOVERY_LIMIT:
-                                break
-                        logger.info(f"Fallback link scan found {len(seen_ids)} jobs (total: {len(jobs)})")
-                        if len(jobs) >= MAX_DISCOVERY_LIMIT:
-                            break
-                        if not seen_ids:
-                            Path("data").mkdir(exist_ok=True)
-                            await page.screenshot(path=f"data/search_zero_results_{int(datetime.now().timestamp())}.png")
-                        continue
-                    
-                    # Limit to first 25 per search or until limit reached
-                    for i in range(min(count, 25)):
-                        if len(jobs) >= MAX_DISCOVERY_LIMIT:
-                            break
-                        try:
-                            card = job_cards.nth(i)
-                            
-                            # Extract basic info with broader selectors
-                            job_title_el = card.locator('h3, a[data-tracking-control-name*="job"], .job-card-list__title').first
-                            job_title = (await job_title_el.inner_text()).strip() if await job_title_el.count() else "Unknown"
-                            
-                            company_el = card.locator('h4, a[data-tracking-control-name*="company"], .job-card-container__company-name').first
-                            company = (await company_el.inner_text()).strip() if await company_el.count() else "Unknown"
-                            
-                            job_location_el = card.locator('span.job-search-card__location, .job-card-container__metadata-item').first
-                            job_location = (await job_location_el.inner_text()).strip() if await job_location_el.count() else "Unknown"
-                            
-                            job_link_el = card.locator('a[data-tracking-control-name*="job"], .job-card-list__title, .job-card-container__link').first
-                            job_link = await job_link_el.get_attribute('href')
-                            
-                            if job_link and job_link.startswith('/'):
-                                job_link = f"https://www.linkedin.com{job_link}"
-                            elif not job_link or not job_link.startswith('http'):
-                                continue # Skip invalid links
-                            
-                            # Extract job ID from URL
-                            job_id = self._extract_linkedin_job_id(job_link)
-                            if job_id.isdigit():
-                                job_link = f"https://www.linkedin.com/jobs/view/{job_id}/"
-                            
-                            # Create Job object (guard check happens later)
-                            job = Job(
-                                job_id=f"linkedin_{job_id}",
-                                platform=Platform.LINKEDIN,
-                                title=job_title.strip(),
-                                company=company.strip(),
-                                location=job_location.strip(),
-                                url=job_link,
-                                guard_status=GuardStatus.UNKNOWN,
-                                has_easy_apply=False,  # verified later by the guard (f_AL filter is not a guarantee)
-                                posted_date=datetime.now()
-                            )
-                            
-                            jobs.append(job)
-                            
-                        except Exception as e:
-                            logger.warning(f"Failed to parse LinkedIn job card: {e}")
-                            continue
-                    
-                except Exception as e:
-                    logger.error(f"Failed to scrape LinkedIn for '{title}' in '{location}': {e}")
-                    continue
-        
         if should_close_page:
             await page.close()
-        logger.info(f"Scraped {len(jobs)} LinkedIn jobs")
+        logger.info(f"Scraped {len(jobs)} LinkedIn jobs "
+                    f"({sum(1 for j in jobs if getattr(j, 'search_group', '') == 'local')} local, "
+                    f"{sum(1 for j in jobs if getattr(j, 'search_group', '') == 'remote')} remote)")
         return jobs
-    
+
+    async def _scrape_one_search(self, page: Page, search_url: str, title: str, location: str) -> List[Job]:
+        """Open one LinkedIn search and return up to 25 job candidates."""
+        jobs: List[Job] = []
+        try:
+            await page.goto(search_url, wait_until='domcontentloaded', timeout=30000)
+            await page.wait_for_timeout(4000)
+            # Scroll the results list a few times so lazy-loaded cards render
+            for _ in range(6):
+                try:
+                    await page.evaluate("""() => {
+                        const list = document.querySelector('.jobs-search-results-list, .jobs-search-results__list, .scaffold-layout__list > div, .scaffold-layout__list');
+                        if (list) { list.scrollTop = list.scrollHeight; } else { window.scrollBy(0, 1500); }
+                    }""")
+                except Exception:
+                    pass
+                await page.wait_for_timeout(800)
+
+            # Extract job listings - support both logged-out and logged-in selectors
+            job_cards = page.locator('div.job-search-card, li.jobs-search-results__list-item, div.job-card-container')
+            count = await job_cards.count()
+            
+            logger.info(f"Found {count} LinkedIn jobs for '{title}' in '{location}'")
+
+            if count == 0:
+                # LinkedIn renamed its CSS classes: fall back to job links,
+                # which always look like /jobs/view/<id>/. Title/company are
+                # filled in later by the guard step from the job page itself.
+                links = await page.eval_on_selector_all(
+                    'a[href*="/jobs/view/"]',
+                    "els => els.map(e => ({href: e.href, text: (e.innerText || '').trim()}))"
+                )
+                seen_ids = set()
+                for item in links:
+                    href = item.get("href") or ""
+                    jid = self._extract_linkedin_job_id(href)
+                    if not jid or not jid.isdigit() or jid in seen_ids:
+                        continue
+                    seen_ids.add(jid)
+                    jobs.append(Job(
+                        job_id=f"linkedin_{jid}",
+                        platform=Platform.LINKEDIN,
+                        title=(item.get("text") or "Unknown").split("\n")[0][:120] or "Unknown",
+                        company="Unknown",
+                        location="Unknown",
+                        url=f"https://www.linkedin.com/jobs/view/{jid}/",
+                        guard_status=GuardStatus.UNKNOWN,
+                        has_easy_apply=False,  # verified later by the guard
+                        posted_date=datetime.now(),
+                    ))
+                    if len(seen_ids) >= 25:
+                        break
+                logger.info(f"Fallback link scan found {len(seen_ids)} jobs")
+                if not seen_ids:
+                    Path("data").mkdir(exist_ok=True)
+                    await page.screenshot(path=f"data/search_zero_results_{int(datetime.now().timestamp())}.png")
+                return jobs
+
+            # First 25 cards of this search
+            for i in range(min(count, 25)):
+                try:
+                    card = job_cards.nth(i)
+                    
+                    # Extract basic info with broader selectors
+                    job_title_el = card.locator('h3, a[data-tracking-control-name*="job"], .job-card-list__title').first
+                    job_title = (await job_title_el.inner_text()).strip() if await job_title_el.count() else "Unknown"
+                    
+                    company_el = card.locator('h4, a[data-tracking-control-name*="company"], .job-card-container__company-name').first
+                    company = (await company_el.inner_text()).strip() if await company_el.count() else "Unknown"
+                    
+                    job_location_el = card.locator('span.job-search-card__location, .job-card-container__metadata-item').first
+                    job_location = (await job_location_el.inner_text()).strip() if await job_location_el.count() else "Unknown"
+                    
+                    job_link_el = card.locator('a[data-tracking-control-name*="job"], .job-card-list__title, .job-card-container__link').first
+                    job_link = await job_link_el.get_attribute('href')
+                    
+                    if job_link and job_link.startswith('/'):
+                        job_link = f"https://www.linkedin.com{job_link}"
+                    elif not job_link or not job_link.startswith('http'):
+                        continue # Skip invalid links
+                    
+                    # Extract job ID from URL
+                    job_id = self._extract_linkedin_job_id(job_link)
+                    if job_id.isdigit():
+                        job_link = f"https://www.linkedin.com/jobs/view/{job_id}/"
+                    
+                    # Create Job object (guard check happens later)
+                    job = Job(
+                        job_id=f"linkedin_{job_id}",
+                        platform=Platform.LINKEDIN,
+                        title=job_title.strip(),
+                        company=company.strip(),
+                        location=job_location.strip(),
+                        url=job_link,
+                        guard_status=GuardStatus.UNKNOWN,
+                        has_easy_apply=False,  # verified later by the guard (f_AL filter is not a guarantee)
+                        posted_date=datetime.now()
+                    )
+                    
+                    jobs.append(job)
+                    
+                except Exception as e:
+                    logger.warning(f"Failed to parse LinkedIn job card: {e}")
+                    continue
+            
+        except Exception as e:
+            logger.error(f"Failed to scrape LinkedIn for '{title}' in '{location}': {e}")
+        return jobs
+
     async def _scrape_indeed(
         self,
         titles: List[str],
@@ -299,13 +379,14 @@ class JobScraper:
     WORK_TYPE_CODES = {"onsite": "1", "remote": "2", "hybrid": "3"}
     EXPERIENCE_CODES = {"internship": "1", "entry": "2", "associate": "3", "mid_senior": "4", "director": "5", "executive": "6"}
 
-    def _build_linkedin_search_url(self, title: str, location: str, days_ago: int) -> str:
-        """LinkedIn search URL built from the user's search settings (config["search"])."""
+    def _build_linkedin_search_url(self, title: str, location: str, days_ago: int, work_types: List[str] = None) -> str:
+        """LinkedIn search URL built from the user's search settings (config["search"]).
+        `work_types` overrides the Settings work types (the search plan passes local/remote types)."""
         from urllib.parse import urlencode
         from src.salary import linkedin_salary_filter
 
         search = self.config.get("search", {}) or {}
-        work_types = [w.lower() for w in (search.get("work_types") or [])]
+        work_types = [w.lower() for w in (work_types if work_types is not None else (search.get("work_types") or []))]
         loc = (location or "").strip()
         if loc.lower() in ("remote", "anywhere", "remote (us)"):
             loc = "United States"
@@ -325,7 +406,7 @@ class JobScraper:
         if ex:
             params["f_E"] = ",".join(sorted(set(ex)))
         dist = search.get("distance_miles")
-        if dist and loc.lower() != "united states":
+        if dist and "united states" not in loc.lower():
             params["distance"] = str(int(dist))
         sb2 = linkedin_salary_filter(self.config)
         if sb2:
@@ -484,6 +565,15 @@ class GuardedJobScraper(JobScraper):
                                 break
                     
                     reason = self.excluded_reason(job)
+                    if not reason:
+                        # On-site/hybrid job in a state the user didn't pick -> skip before applying
+                        from src.locations import outside_area, home_states
+                        allowed = home_states((self.config.get("search", {}) or {}).get("locations") or [])
+                        try:
+                            top_text = await page.locator("main").first.inner_text(timeout=3000)
+                        except Exception:
+                            top_text = ""
+                        reason = outside_area(job.location, top_text, allowed)
                     if reason:
                         from src.application_guard import GuardResult
                         guard_result = GuardResult(GuardStatus.SKIP_EXCLUDED, reason)

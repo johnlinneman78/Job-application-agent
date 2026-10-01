@@ -92,6 +92,7 @@ class Job(BaseModel):
     recruiter_name: Optional[str] = None
     recruiter_url: Optional[str] = None
     matched_skills: List[str] = Field(default_factory=list)
+    search_group: Optional[str] = None  # 'local' or 'remote' - which search found it
     posted_salary: Optional[str] = None  # e.g. '$60,000 - $75,000 /yr' as read from the posting
     
     class Config:

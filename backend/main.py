@@ -126,6 +126,9 @@ class JobSearchConfig(_Open):
     distance_miles: Optional[int] = None          # 10, 25, 50, 100 (ignored for "United States"/"Remote")
     exclude_title_words: List[str] = []           # e.g. ["senior", "director", "commission only"]
     exclude_companies: List[str] = []
+    remote_scope: str = "state"                   # remote jobs: "state" (listed in my state) | "us" (anywhere) | "off"
+    local_share: int = 70                         # % of discovered jobs from local (on-site/hybrid) searches
+    max_discovered: int = 40                      # jobs looked at per search run
 
 
 class PersonalInfo(_Open):
@@ -400,6 +403,34 @@ async def update_config(config: Configuration, current_user: dict = Depends(get_
     logger.info(f"Configuration updated: {current_user['email']}")
     return {"message": "Configuration updated successfully", "config": config}
 
+def find_resume_path(user_email: str) -> str:
+    """The user's resume PDF: Settings path first, then the usual upload locations."""
+    cfg = configs_db.get(user_email) or {}
+    p = (cfg.get("personal_info") or {}).get("resume_path")
+    if p and Path(p).is_file():
+        return p
+    for cand in [Path("data/resume.pdf"), Path("uploads") / user_email / "resume.pdf",
+                 Path("backend/uploads") / user_email / "resume.pdf", WORKSPACE_ROOT / "data" / "resume.pdf"]:
+        if cand.is_file():
+            return str(cand.absolute())
+    return ""
+
+
+@app.get("/api/resume/experience")
+async def resume_experience(current_user: dict = Depends(get_current_user)):
+    """Years of experience the bot worked out from the resume (src/experience.py)."""
+    path = find_resume_path(current_user["email"])
+    if not path:
+        return {"found": False, "message": "No resume uploaded yet."}
+    from src.resume_analyzer import ResumeAnalyzer
+    from src.experience import build_profile
+    text = ResumeAnalyzer()._extract_text_from_pdf(path)
+    prof = build_profile(text).as_dict()
+    prof["found"] = True
+    prof["roles_found"] = len(prof["roles"])
+    return prof
+
+
 @app.post("/api/resume/upload")
 async def upload_resume(
     file: UploadFile = File(...),
@@ -489,7 +520,7 @@ async def trigger_job_search(
                         from src.job_ranker import JobRanker
                         analyzer = ResumeAnalyzer()
                         parsed_resume = analyzer.parse_resume(resume_path)
-                        ranker = JobRanker(parsed_resume)
+                        ranker = JobRanker(parsed_resume, config.get("search", {}).get("locations") or [])
                         logger.info(f"Initialized JobRanker for scoring with resume: {resume_path}")
                     except Exception as e:
                         logger.warning(f"Failed to initialize JobRanker: {e}")

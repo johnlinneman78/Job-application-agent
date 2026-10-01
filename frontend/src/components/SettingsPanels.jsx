@@ -1,6 +1,41 @@
 // Settings panels: Job Search, Salary, Screening Answers, Pacing, Contact details.
 // Each panel edits one section of the config object through `update(section, key, value)`.
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+async function getJSON(path) {
+  const token = localStorage.getItem('token')
+  const r = await fetch(`${API_URL}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  if (!r.ok) throw new Error(`${r.status}`)
+  return r.json()
+}
+
+// What the bot worked out from the uploaded resume (GET /api/resume/experience)
+function ResumeExperience({ enabled }) {
+  const [data, setData] = useState(null)
+  const [err, setErr] = useState('')
+  useEffect(() => { if (enabled) getJSON('/api/resume/experience').then(setData).catch(e => setErr(e.message)) }, [enabled])
+  if (!enabled) return null
+  if (err) return <div className="field-hint">Could not read the resume ({err}).</div>
+  if (!data) return <div className="field-hint">Reading your resume…</div>
+  if (!data.found) return <div className="resume-exp warn">No resume uploaded yet. Upload one under Personal Profile so experience questions can be answered.</div>
+  if (!data.roles_found) return <div className="resume-exp warn">No dated jobs found in the resume (looks for dates like "Aug 2019 – Jul 2021"). Use the manual fields below.</div>
+  const NAMES = { crm: 'CRM', 'b2b sales': 'B2B sales', 'it support': 'IT support', hubspot: 'HubSpot', servicenow: 'ServiceNow',
+    salesforce: 'Salesforce', zendesk: 'Zendesk', excel: 'Excel', aws: 'AWS', sql: 'SQL', 'microsoft 365': 'Microsoft 365',
+    'office 365': 'Office 365', 'microsoft office': 'Microsoft Office', 'sales navigator': 'Sales Navigator', zoominfo: 'ZoomInfo' }
+  const nice = (k) => NAMES[k] || (k.charAt(0).toUpperCase() + k.slice(1))
+  const chips = (obj) => Object.entries(obj).map(([k, v]) => (
+    <span key={k} className="exp-chip">{nice(k)} <b>{v > 0 ? `${v} yr${v === 1 ? '' : 's'}` : 'under 6 mo'}</b></span>))
+  return (
+    <div className="resume-exp">
+      <div><b>From your resume:</b> {data.roles_found} jobs, about <b>{data.total_years}</b> years total.</div>
+      <div className="exp-chips">{chips(data.areas)}</div>
+      {Object.keys(data.tools).length > 0 && <div className="exp-chips"><span className="muted">Tools:</span>{chips(data.tools)}</div>}
+      {data.skills_only?.length > 0 && <div className="field-hint">Listed in skills only (answers "Yes" to "do you have experience with…", years left blank): {data.skills_only.map(nice).join(', ')}</div>}
+      <div className="field-hint">Years are rounded to the nearest year from your job dates, never added up twice for overlapping jobs. Anything you enter below overrides these.</div>
+    </div>
+  )
+}
 
 const NOT_SET = ''
 
@@ -134,11 +169,11 @@ export function SearchPanel({ config, update }) {
       <Field label="Job titles to search" hint="Each title is searched separately. Press Enter to add.">
         <ChipInput values={s.keywords || []} onChange={set('keywords')} placeholder="e.g. Account Manager" suggestions={KEYWORD_SUGGESTIONS} />
       </Field>
-      <Field label="Locations" hint='Use "United States" plus the Remote work type for nationwide remote jobs.'>
+      <Field label="Your cities" hint='Cities to search for on-site and hybrid jobs. On-site/hybrid jobs outside these states are skipped. Remote is set separately below.'>
         <ChipInput values={s.locations || []} onChange={set('locations')} placeholder="e.g. Portland, OR" suggestions={LOCATION_SUGGESTIONS} />
       </Field>
       <div className="settings-grid two">
-        <Field label="Work type" hint="None selected = any.">
+        <Field label="Work type" hint="On-site/Hybrid = searched in your cities above. Remote = searched separately (see below). None selected = all.">
           <PillToggle values={s.work_types || []} onChange={set('work_types')}
             options={[{ value: 'remote', label: 'Remote' }, { value: 'hybrid', label: 'Hybrid' }, { value: 'onsite', label: 'On-site' }]} />
         </Field>
@@ -146,6 +181,25 @@ export function SearchPanel({ config, update }) {
           <select value={s.distance_miles ?? ''} onChange={e => set('distance_miles')(e.target.value ? Number(e.target.value) : null)}>
             <option value="">LinkedIn default</option>
             {[5, 10, 25, 50, 100].map(m => <option key={m} value={m}>Within {m} miles</option>)}
+          </select>
+        </Field>
+      </div>
+      <div className="settings-grid three">
+        <Field label="Remote jobs" hint="Many remote jobs only hire in certain states. “My state” finds remote jobs listed for your state.">
+          <select value={s.remote_scope || 'state'} onChange={e => set('remote_scope')(e.target.value)}>
+            <option value="state">Remote jobs listed in my state</option>
+            <option value="us">Remote jobs anywhere in the US</option>
+            <option value="off">Don't search remote jobs</option>
+          </select>
+        </Field>
+        <Field label="Local vs. remote mix" hint="Local jobs are searched and applied to first.">
+          <select value={s.local_share ?? 70} onChange={e => set('local_share')(Number(e.target.value))}>
+            {[100, 80, 70, 50, 30, 0].map(n => <option key={n} value={n}>{n}% local / {100 - n}% remote</option>)}
+          </select>
+        </Field>
+        <Field label="Jobs to look at per run">
+          <select value={s.max_discovered ?? 40} onChange={e => set('max_discovered')(Number(e.target.value))}>
+            {[20, 30, 40, 60, 80].map(n => <option key={n} value={n}>{n}</option>)}
           </select>
         </Field>
       </div>
@@ -288,15 +342,28 @@ export function ScreeningPanel({ config, update }) {
       </div>
 
       <h4>Experience</h4>
+      <label className="check-row">
+        <input type="checkbox" checked={String(a.use_resume_experience ?? 'true') !== 'false'}
+          onChange={e => set('use_resume_experience')(e.target.checked ? 'true' : 'false')} />
+        <span>Work out years of experience from my resume (customer service, sales, CRM, healthcare…)</span>
+      </label>
+      <ResumeExperience enabled={String(a.use_resume_experience ?? 'true') !== 'false'} />
+      <Field label="When my resume shows no experience in something a job asks about"
+        hint="Example: “How many years of Zendesk?” when Zendesk isn't on your resume.">
+        <select value={a.no_experience_answer || 'answer'} onChange={e => set('no_experience_answer')(e.target.value)}>
+          <option value="answer">Answer honestly (0 years / No) and apply</option>
+          <option value="skip">Skip the job</option>
+        </select>
+      </Field>
       <div className="settings-grid three">
-        <Field label="Total years of work experience"><NumberBox value={a.years_experience} onChange={set('years_experience')} max={50} placeholder="e.g. 8" /></Field>
-        <Field label="Years in sales / account mgmt / customer success"><NumberBox value={a.sales_experience} onChange={set('sales_experience')} max={50} placeholder="e.g. 6" /></Field>
+        <Field label="Total years of work experience" hint="Blank = use the resume total."><NumberBox value={a.years_experience} onChange={set('years_experience')} max={50} placeholder="e.g. 8" /></Field>
+        <Field label="Years in sales / account mgmt / customer success" hint="Blank = use the resume."><NumberBox value={a.sales_experience} onChange={set('sales_experience')} max={50} placeholder="e.g. 6" /></Field>
         <Field label="Earliest start date">
           <Choice value={a.start_date} onChange={set('start_date')} options={['Immediately', '1 week', '2 weeks', '3 weeks', '1 month']} />
         </Field>
       </div>
       <Field label="Years with specific tools or skills"
-        hint='Used for "How many years of Salesforce?" and "Do you have experience with HubSpot?". Anything not listed here is skipped.'>
+        hint='Optional overrides for "How many years of Salesforce?" / "Do you have experience with HubSpot?". These win over the resume.'>
         <SkillYears value={a.skill_years || {}} onChange={set('skill_years')} />
       </Field>
 
@@ -359,6 +426,7 @@ export function validateSettings(config) {
   const app = config.application || {}
   if (Number(app.max_delay) < Number(app.min_delay)) errs.push('Maximum wait must be at least the minimum wait.')
   if (!(config.search?.keywords || []).length) errs.push('Add at least one job title to search.')
-  if (!(config.search?.locations || []).length) errs.push('Add at least one location.')
+  const remoteOnlyUS = (config.search?.remote_scope === 'us') && (config.search?.work_types || []).join() === 'remote'
+  if (!(config.search?.locations || []).length && !remoteOnlyUS) errs.push('Add at least one city (or choose Remote only + anywhere in the US).')
   return errs
 }

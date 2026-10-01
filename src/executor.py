@@ -146,6 +146,8 @@ class ApplicationExecutor:
         buttons_clicked: List[str] = []
         self._recovery_attempts = 0
         self.answerer.reset()
+        self.answerer.load_resume(resume_path)   # experience from resume (cached per file)
+        skip_detail = ""                          # the exact question / field that blocked the job
 
         logger.info(f"--- Starting Application: {job.company} - {job.title} ---")
 
@@ -193,6 +195,7 @@ class ApplicationExecutor:
                     reason = await self._screening_reason(modal)
                     if reason:
                         logger.info(f"  Skip: {reason}")
+                        skip_detail = reason
                         state = FSMState.SKIPPED
                         terminal_reason = (TerminalReason.COVER_LETTER_REQUIRED
                                            if "cover letter" in reason.lower()
@@ -253,7 +256,7 @@ class ApplicationExecutor:
 
                 elif state == FSMState.SKIPPED:
                     app.status = ApplicationStatus.SKIPPED
-                    app.error_message = terminal_reason.value if terminal_reason else "Unknown"
+                    app.error_message = (terminal_reason.value if terminal_reason else "Unknown") + (f": {skip_detail}" if skip_detail else "")
                     await self._close_modal_if_open(discard=True)
                     break
             else:
@@ -386,7 +389,7 @@ class ApplicationExecutor:
                 continue
             if await self.answerer.is_answered(modal, f, label):
                 continue
-            return f"Question field: '{label[:60] or 'unlabeled'}'"
+            return f"Question field: '{(label or 'unlabeled')[:120]}'"
 
         # Radio buttons: allowed only for choosing which resume to send
         for r in await modal.locator('input[type="radio"]').all():
@@ -396,7 +399,11 @@ class ApplicationExecutor:
                 continue
             if await self.answerer.is_answered(modal, r, label):
                 continue
-            return f"Multiple-choice question: '{label[:60] or 'unlabeled'}'"
+            legend = await r.evaluate(
+                "el => { const fs = el.closest('fieldset'); const lg = fs && fs.querySelector('legend'); return lg ? lg.innerText : ''; }"
+            )
+            question = (legend or label or "unlabeled").strip().lower()
+            return f"Multiple-choice question: '{question[:120]}'"
 
         # Checkboxes: allowed only for consent / follow-company
         for c in await modal.locator('input[type="checkbox"]').all():
