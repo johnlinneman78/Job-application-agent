@@ -48,7 +48,7 @@
 ---
 
 ## 4. Status
-- **Last known GitHub commit**: 79a9a41 (always copy the hash from `git log --oneline -1` after pushing)
+- **Last known GitHub commit**: c139870 (always copy the hash from `git log --oneline -1` after pushing)
 - **Current State**: 
   - Settings tabs & screening answers backend/frontend implemented.
   - Tracker page frontend bug fixes applied and verified:
